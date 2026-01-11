@@ -1,0 +1,10 @@
+{
+    "target_height": 480,
+    "video_bitrate": "800k",
+    "audio_bitrate": "128k",
+    "target_fps": 30,
+    "max_workers": 4,
+    "recursive": false,
+    "verify_frames": true,
+    "auto_download_ffmpeg": true
+}

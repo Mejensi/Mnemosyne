@@ -1,0 +1,50 @@
+# Mnemosyne - Video Converter
+
+## .gitignore yapısı
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Mnemosyne specific
+bin/
+logs/
+*.bak
+mnemosyne_tmp_*
+*.log
+
+# Config overrides (user-specific)
+config.local.json
