@@ -3,6 +3,9 @@
 Mnemosyne V1.0 - The Keeper of Digital Memory
 Copyright (C) 2026 Mejensi
 Licensed under GNU GPL v3.0
+
+This software relies on FFmpeg (https://ffmpeg.org) for video processing.
+FFmpeg is licensed under the LGPL/GPL.
 """
 import os, sys, platform, subprocess, shutil, time, datetime, json, argparse, threading, traceback, logging, random
 from pathlib import Path
