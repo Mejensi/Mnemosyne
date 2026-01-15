@@ -1,31 +1,24 @@
-# Mnemosyne
+# Mnemosyne - The Keeper of Digital Memory
 
-Mnemosyne is a tool designed to compress your video collection while preserving the original viewing experience. It scans your folders for video files and converts them to a standardized format (480p, optimized bitrate) to save disk space.
+Mnemosyne is a powerful, automated video compression engine designed for simplicity and absolute metadata preservation. It optimizes your video collection to 480p while ensuring your digital history remains intact.
 
-The main difference between Mnemosyne and other converters is its focus on preservation. It keeps the original file's creation and modification dates, so your timeline remains intact. It also uses a safety mechanism to ensure no data is lost during the conversion process; the original file is only replaced effectively after the new one is verified.
+### Features
+- **Smart Compression**: Automatically optimizes videos to H.264 at 480p using hardware-accelerated encoders (NVENC, QSV, VideoToolbox) with automatic fallback to CPU.
+- **Safety Bridge**: Uses an atomic file swap system to ensure zero data loss. Your original file is only replaced after the conversion is verified.
+- **Timeline Preservation**: Unlike standard converters, Mnemosyne restores the original creation and modification timestamps to the new files.
+- **Zero-Friction Portability**: All execution scripts are fully self-contained polyglots. They include the core engine source code internally for maximum portability.
 
-## Features
+### Instructions
 
-- **Space Saving**: Reduces file sizes significantly by converting to efficient 480p H.264.
-- **Metadata Protection**: Copies the original creation and modification timestamps to the new file.
-- **Safety First**: Uses temporary files and atomic swaps. If a conversion fails or is interrupted, your original file is untouched.
-- **Smart Encoding**: Automatically detects your hardware (NVIDIA, Intel, Apple, or CPU) and chooses the best way to convert the video.
-- **Recursive Scan**: Can process a single folder or search through all subfolders.
+#### Windows
+Run **mnemosyne.bat**. It handles environment checks and can automatically install Python via winget if missing.
 
-## How to Use
+#### Linux & macOS
+Run **bash mnemosyne.sh**. The script is fully self-contained. Ensure Python 3 is installed on your system.
 
-### Windows
-Double-click `mnemosyne.bat`. If you don't have Python installed, it will offer to install it for you.
+### Legal & Attribution
+This project is open-source software licensed under the **GNU General Public License v3.0**. 
 
-### Linux / macOS
-Open a terminal and run `mnemosyne.sh`. You will need to have Python 3 and FFmpeg installed on your system.
-```bash
-bash mnemosyne.sh
-```
+Mnemosyne relies on **FFmpeg** for video processing. Please refer to [NOTICE.md](NOTICE.md) for full third-party attributions, license details, and the disclaimer of warranty.
 
-## Requirements
-- Python 3+
-- FFmpeg (The Windows version can download this automatically)
-
-## License
-This project is licensed under the GNU General Public License v3.0.
+Copyright (C) 2026 Mejensi.
