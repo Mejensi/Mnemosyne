@@ -51,6 +51,9 @@ REM#PY# """
 REM#PY# Mnemosyne V1.0 - The Keeper of Digital Memory
 REM#PY# Copyright (C) 2026 Mejensi
 REM#PY# Licensed under GNU GPL v3.0
+REM#PY# 
+REM#PY# This software relies on FFmpeg (https://ffmpeg.org) for video processing.
+REM#PY# FFmpeg is licensed under the LGPL/GPL.
 REM#PY# """
 REM#PY# import os, sys, platform, subprocess, shutil, time, datetime, json, argparse, threading, traceback, logging, random
 REM#PY# from pathlib import Path
@@ -788,6 +791,9 @@ REM#PY# """
 REM#PY# Mnemosyne V1.0 - The Keeper of Digital Memory
 REM#PY# Copyright (C) 2026 Mejensi
 REM#PY# Licensed under GNU GPL v3.0
+REM#PY# 
+REM#PY# This software relies on FFmpeg (https://ffmpeg.org) for video processing.
+REM#PY# FFmpeg is licensed under the LGPL/GPL.
 REM#PY# """
 REM#PY# import os, sys, platform, subprocess, shutil, time, datetime, json, argparse, threading, traceback, logging, random
 REM#PY# from pathlib import Path
