@@ -7,7 +7,7 @@ REM Copyright (C) 2026 Mejensi
 REM Licensed under GNU General Public License v3.0
 REM ============================================================================
 setlocal enabledelayedexpansion
-title Mnemosyne v1.0
+title Mnemosyne v1.1
 
 REM Enable Unicode support for CMD and Python
 chcp 65001 >nul
@@ -48,7 +48,7 @@ REM Extract embedded Python code to temporary file - Simple & Reliable PS versio
 set "TEMP_PY=%TEMP%\mnemosyne_runtime_%RANDOM%.py"
 REM#PY# # -*- coding: utf-8 -*-
 REM#PY# """
-REM#PY# Mnemosyne V1.0 - The Keeper of Digital Memory
+REM#PY# Mnemosyne V1.1 - The Keeper of Digital Memory
 REM#PY# Copyright (C) 2026 Mejensi
 REM#PY# Licensed under GNU GPL v3.0
 REM#PY# 
@@ -73,7 +73,7 @@ REM#PY#         mode.value |= 0x0004 # ENABLE_VIRTUAL_TERMINAL_PROCESSING
 REM#PY#         kernel32.SetConsoleMode(hStdOut, mode)
 REM#PY#     except: pass
 REM#PY# 
-REM#PY# VERSION, APP_NAME = "1.0", "Mnemosyne"
+REM#PY# VERSION, APP_NAME = "1.1", "Mnemosyne"
 REM#PY# SYSTEM, IS_WINDOWS = platform.system(), platform.system() == "Windows"
 REM#PY# 
 REM#PY# # Setup Paths
@@ -788,7 +788,7 @@ REM EMBEDDED PYTHON CODE
 REM ============================================================================
 REM#PY# # -*- coding: utf-8 -*-
 REM#PY# """
-REM#PY# Mnemosyne V1.0 - The Keeper of Digital Memory
+REM#PY# Mnemosyne V1.1 - The Keeper of Digital Memory
 REM#PY# Copyright (C) 2026 Mejensi
 REM#PY# Licensed under GNU GPL v3.0
 REM#PY# 
@@ -813,7 +813,7 @@ REM#PY#         mode.value |= 0x0004 # ENABLE_VIRTUAL_TERMINAL_PROCESSING
 REM#PY#         kernel32.SetConsoleMode(hStdOut, mode)
 REM#PY#     except: pass
 REM#PY# 
-REM#PY# VERSION, APP_NAME = "1.0", "Mnemosyne"
+REM#PY# VERSION, APP_NAME = "1.1", "Mnemosyne"
 REM#PY# SYSTEM, IS_WINDOWS = platform.system(), platform.system() == "Windows"
 REM#PY# 
 REM#PY# # Setup Paths
