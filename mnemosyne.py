@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Mnemosyne V1.0 - The Keeper of Digital Memory
+Mnemosyne V1.1 - The Keeper of Digital Memory
 Copyright (C) 2026 Mejensi
 Licensed under GNU GPL v3.0
 
@@ -25,7 +25,7 @@ if platform.system() == "Windows":
         kernel32.SetConsoleMode(hStdOut, mode)
     except: pass
 
-VERSION, APP_NAME = "1.0", "Mnemosyne"
+VERSION, APP_NAME = "1.1", "Mnemosyne"
 SYSTEM, IS_WINDOWS = platform.system(), platform.system() == "Windows"
 
 # Setup Paths
