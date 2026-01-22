@@ -1,4 +1,4 @@
-# Mnemosyne - The Keeper of Digital Memory
+# Mnemosyne - The Keeper of Digital Memory v1.1
 
 Mnemosyne is a powerful, automated video compression engine designed for simplicity and absolute metadata preservation. It optimizes your video collection to 480p while ensuring your digital history remains intact.
 
