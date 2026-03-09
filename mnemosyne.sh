@@ -381,12 +381,21 @@ def download_ffmpeg():
     print(f"\n{C.INFO}[DOWNLOAD] Fetching FFmpeg...{C.RESET}")
     try:
         import urllib.request
-        def reporthook(b, b_size, total):
-            if total > 0:
-                pct = min(100, (b * b_size / total) * 100)
-                bar = '█' * int(40 * pct / 100) + '░' * (40 - int(40 * pct / 100))
-                print(f"\r{C.INFO}[PROGRESS]{C.RESET} {bar} {pct:5.1f}%", end='', flush=True)
-        urllib.request.urlretrieve(url, archive_path, reporthook=reporthook)
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response, open(archive_path, 'wb') as out_file:
+            total = int(response.info().get('Content-Length', -1))
+            b_size = 8192
+            b_read = 0
+            while True:
+                buffer = response.read(b_size)
+                if not buffer: break
+                out_file.write(buffer)
+                b_read += len(buffer)
+                if total > 0:
+                    pct = min(100, (b_read / total) * 100)
+                    bar = '█' * int(40 * pct / 100) + '░' * (40 - int(40 * pct / 100))
+                    sys.stdout.write(f"\r{C.INFO}[PROGRESS]{C.RESET} {bar} {pct:5.1f}%")
+                    sys.stdout.flush()
         print(f"\n{C.INFO}[EXTRACT] Extracting binaries...{C.RESET}")
         if archive_ext == ".zip":
             import zipfile

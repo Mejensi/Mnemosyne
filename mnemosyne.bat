@@ -421,12 +421,21 @@ REM#PY#     archive_path = BIN_DIR / f"ffmpeg{archive_ext}"
 REM#PY#     print(f"\n{C.INFO}[DOWNLOAD] Fetching FFmpeg...{C.RESET}")
 REM#PY#     try:
 REM#PY#         import urllib.request
-REM#PY#         def reporthook(b, b_size, total):
-REM#PY#             if total > 0:
-REM#PY#                 pct = min(100, (b * b_size / total) * 100)
-REM#PY#                 bar = '█' * int(40 * pct / 100) + '░' * (40 - int(40 * pct / 100))
-REM#PY#                 print(f"\r{C.INFO}[PROGRESS]{C.RESET} {bar} {pct:5.1f}%", end='', flush=True)
-REM#PY#         urllib.request.urlretrieve(url, archive_path, reporthook=reporthook)
+REM#PY#         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+REM#PY#         with urllib.request.urlopen(req) as response, open(archive_path, 'wb') as out_file:
+REM#PY#             total = int(response.info().get('Content-Length', -1))
+REM#PY#             b_size = 8192
+REM#PY#             b_read = 0
+REM#PY#             while True:
+REM#PY#                 buffer = response.read(b_size)
+REM#PY#                 if not buffer: break
+REM#PY#                 out_file.write(buffer)
+REM#PY#                 b_read += len(buffer)
+REM#PY#                 if total > 0:
+REM#PY#                     pct = min(100, (b_read / total) * 100)
+REM#PY#                     bar = '█' * int(40 * pct / 100) + '░' * (40 - int(40 * pct / 100))
+REM#PY#                     sys.stdout.write(f"\r{C.INFO}[PROGRESS]{C.RESET} {bar} {pct:5.1f}%")
+REM#PY#                     sys.stdout.flush()
 REM#PY#         print(f"\n{C.INFO}[EXTRACT] Extracting binaries...{C.RESET}")
 REM#PY#         if archive_ext == ".zip":
 REM#PY#             import zipfile
