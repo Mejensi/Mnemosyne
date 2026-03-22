@@ -102,8 +102,8 @@ REM#PY# else:
 REM#PY#     APP_DATA = Path.home() / ".mnemosyne"
 REM#PY# 
 REM#PY# LOG_DIR = APP_DATA / "logs"
-REM#PY# BIN_DIR = Path("bin")
-REM#PY# CONFIG_FILE = Path("config.json")
+REM#PY# BIN_DIR = APP_DATA / "bin"
+REM#PY# CONFIG_FILE = APP_DATA / "config.json"
 REM#PY# 
 REM#PY# # Configuration
 REM#PY# DEFAULT_CONFIG = {
@@ -401,7 +401,7 @@ REM#PY#                 ctypes.windll.kernel32.SetFileTime(h, ctypes.byref(ft), 
 REM#PY#                 ctypes.windll.kernel32.CloseHandle(h)
 REM#PY#         except: pass
 REM#PY# 
-REM#PY# FFMPEG_URLS = {"Windows": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip", "Linux": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz", "Darwin": "https://evermeet.cx/ffmpeg/getrelease/zip"}
+REM#PY# FFMPEG_URLS = {"Windows": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip", "Linux": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz", "Darwin": "https://evermeet.cx/ffmpeg/getrelease/zip"}
 REM#PY# 
 REM#PY# def check_ffmpeg():
 REM#PY#     if shutil.which("ffmpeg") and shutil.which("ffprobe"): return True
@@ -415,28 +415,70 @@ REM#PY#
 REM#PY# def download_ffmpeg():
 REM#PY#     url = FFMPEG_URLS.get(platform.system())
 REM#PY#     if not url: return False
-REM#PY#     BIN_DIR.mkdir(exist_ok=True)
+REM#PY#     BIN_DIR.mkdir(parents=True, exist_ok=True)
 REM#PY#     archive_ext = ".zip" if platform.system() in ["Windows", "Darwin"] else ".tar.xz"
 REM#PY#     archive_path = BIN_DIR / f"ffmpeg{archive_ext}"
 REM#PY#     print(f"\n{C.INFO}[DOWNLOAD] Fetching FFmpeg...{C.RESET}")
+REM#PY#     
+REM#PY#     success = False
 REM#PY#     try:
 REM#PY#         import urllib.request
-REM#PY#         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-REM#PY#         with urllib.request.urlopen(req) as response, open(archive_path, 'wb') as out_file:
-REM#PY#             total = int(response.info().get('Content-Length', -1))
-REM#PY#             b_size = 8192
-REM#PY#             b_read = 0
-REM#PY#             while True:
-REM#PY#                 buffer = response.read(b_size)
-REM#PY#                 if not buffer: break
-REM#PY#                 out_file.write(buffer)
-REM#PY#                 b_read += len(buffer)
-REM#PY#                 if total > 0:
-REM#PY#                     pct = min(100, (b_read / total) * 100)
-REM#PY#                     bar = '█' * int(40 * pct / 100) + '░' * (40 - int(40 * pct / 100))
-REM#PY#                     sys.stdout.write(f"\r{C.INFO}[PROGRESS]{C.RESET} {bar} {pct:5.1f}%")
-REM#PY#                     sys.stdout.flush()
-REM#PY#         print(f"\n{C.INFO}[EXTRACT] Extracting binaries...{C.RESET}")
+REM#PY#         import ssl
+REM#PY#         
+REM#PY#         def do_download(ctx=None):
+REM#PY#             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+REM#PY#             with urllib.request.urlopen(req, context=ctx, timeout=15) as response, open(archive_path, 'wb') as out_file:
+REM#PY#                 total = int(response.info().get('Content-Length', -1))
+REM#PY#                 b_size = 8192
+REM#PY#                 b_read = 0
+REM#PY#                 while True:
+REM#PY#                     buffer = response.read(b_size)
+REM#PY#                     if not buffer: break
+REM#PY#                     out_file.write(buffer)
+REM#PY#                     b_read += len(buffer)
+REM#PY#                     if total > 0:
+REM#PY#                         pct = min(100, (b_read / total) * 100)
+REM#PY#                         bar = '█' * int(40 * pct / 100) + '░' * (40 - int(40 * pct / 100))
+REM#PY#                         sys.stdout.write(f"\r{C.INFO}[PROGRESS]{C.RESET} {bar} {pct:5.1f}%")
+REM#PY#                         sys.stdout.flush()
+REM#PY#             return True
+REM#PY# 
+REM#PY#         try:
+REM#PY#             success = do_download()
+REM#PY#         except Exception as e:
+REM#PY#             import urllib.error as _ue
+REM#PY#             _is_ssl = isinstance(e, ssl.SSLError) or (
+REM#PY#                 isinstance(e, _ue.URLError) and isinstance(e.reason, ssl.SSLError)
+REM#PY#             )
+REM#PY#             if _is_ssl:
+REM#PY#                 print(f"\n{C.WARNING}[RETRY] SSL Error detected, retrying with unverified context...{C.RESET}")
+REM#PY#                 try:
+REM#PY#                     success = do_download(ctx=ssl._create_unverified_context())
+REM#PY#                 except Exception as e2:
+REM#PY#                     if platform.system() == "Windows":
+REM#PY#                         print(f"\n{C.WARNING}[RETRY] SSL retry failed ({e2}), attempting PowerShell fallback...{C.RESET}")
+REM#PY#                         ps_cmd = f"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri '{url}' -OutFile '{str(archive_path)}' -UserAgent 'Mozilla/5.0'"
+REM#PY#                         res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-NoProfile", "-Command", ps_cmd], capture_output=True)
+REM#PY#                         success = res.returncode == 0
+REM#PY#                     else:
+REM#PY#                         raise e2
+REM#PY#             elif platform.system() == "Windows":
+REM#PY#                 print(f"\n{C.WARNING}[RETRY] Python download failed ({e}), attempting PowerShell fallback...{C.RESET}")
+REM#PY#                 ps_cmd = f"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri '{url}' -OutFile '{str(archive_path)}' -UserAgent 'Mozilla/5.0'"
+REM#PY#                 res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-NoProfile", "-Command", ps_cmd], capture_output=True)
+REM#PY#                 success = res.returncode == 0
+REM#PY#             else:
+REM#PY#                 raise e
+REM#PY#     except Exception as e:
+REM#PY#         print(f"\n{C.ERROR}[ERROR] Download failed: {e}{C.RESET}")
+REM#PY#         return False
+REM#PY# 
+REM#PY#     if not success or not archive_path.exists():
+REM#PY#         print(f"\n{C.ERROR}[ERROR] FFmpeg download failed or file not found.{C.RESET}")
+REM#PY#         return False
+REM#PY# 
+REM#PY#     print(f"\n{C.INFO}[EXTRACT] Extracting binaries...{C.RESET}")
+REM#PY#     try:
 REM#PY#         if archive_ext == ".zip":
 REM#PY#             import zipfile
 REM#PY#             with zipfile.ZipFile(archive_path, 'r') as z:
@@ -457,7 +499,9 @@ REM#PY#                         (BIN_DIR / m.name).chmod(0o755)
 REM#PY#         archive_path.unlink()
 REM#PY#         os.environ["PATH"] = str(BIN_DIR.absolute()) + os.pathsep + os.environ["PATH"]
 REM#PY#         return True
-REM#PY#     except: return False
+REM#PY#     except Exception as e:
+REM#PY#         print(f"\n{C.ERROR}[ERROR] Extraction failed: {e}{C.RESET}")
+REM#PY#         return False
 REM#PY# 
 REM#PY# def ensure_ffmpeg(auto_download=True):
 REM#PY#     if check_ffmpeg(): return True

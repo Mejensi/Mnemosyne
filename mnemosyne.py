@@ -35,8 +35,8 @@ else:
     APP_DATA = Path.home() / ".mnemosyne"
 
 LOG_DIR = APP_DATA / "logs"
-BIN_DIR = Path("bin")
-CONFIG_FILE = Path("config.json")
+BIN_DIR = APP_DATA / "bin"
+CONFIG_FILE = APP_DATA / "config.json"
 
 # Configuration
 DEFAULT_CONFIG = {
@@ -334,7 +334,7 @@ def restore_file_metadata(path, metadata):
                 ctypes.windll.kernel32.CloseHandle(h)
         except: pass
 
-FFMPEG_URLS = {"Windows": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip", "Linux": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz", "Darwin": "https://evermeet.cx/ffmpeg/getrelease/zip"}
+FFMPEG_URLS = {"Windows": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip", "Linux": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz", "Darwin": "https://evermeet.cx/ffmpeg/getrelease/zip"}
 
 def check_ffmpeg():
     if shutil.which("ffmpeg") and shutil.which("ffprobe"): return True
@@ -348,28 +348,70 @@ def check_ffmpeg():
 def download_ffmpeg():
     url = FFMPEG_URLS.get(platform.system())
     if not url: return False
-    BIN_DIR.mkdir(exist_ok=True)
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
     archive_ext = ".zip" if platform.system() in ["Windows", "Darwin"] else ".tar.xz"
     archive_path = BIN_DIR / f"ffmpeg{archive_ext}"
     print(f"\n{C.INFO}[DOWNLOAD] Fetching FFmpeg...{C.RESET}")
+    
+    success = False
     try:
         import urllib.request
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req) as response, open(archive_path, 'wb') as out_file:
-            total = int(response.info().get('Content-Length', -1))
-            b_size = 8192
-            b_read = 0
-            while True:
-                buffer = response.read(b_size)
-                if not buffer: break
-                out_file.write(buffer)
-                b_read += len(buffer)
-                if total > 0:
-                    pct = min(100, (b_read / total) * 100)
-                    bar = '█' * int(40 * pct / 100) + '░' * (40 - int(40 * pct / 100))
-                    sys.stdout.write(f"\r{C.INFO}[PROGRESS]{C.RESET} {bar} {pct:5.1f}%")
-                    sys.stdout.flush()
-        print(f"\n{C.INFO}[EXTRACT] Extracting binaries...{C.RESET}")
+        import ssl
+        
+        def do_download(ctx=None):
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, context=ctx, timeout=15) as response, open(archive_path, 'wb') as out_file:
+                total = int(response.info().get('Content-Length', -1))
+                b_size = 8192
+                b_read = 0
+                while True:
+                    buffer = response.read(b_size)
+                    if not buffer: break
+                    out_file.write(buffer)
+                    b_read += len(buffer)
+                    if total > 0:
+                        pct = min(100, (b_read / total) * 100)
+                        bar = '█' * int(40 * pct / 100) + '░' * (40 - int(40 * pct / 100))
+                        sys.stdout.write(f"\r{C.INFO}[PROGRESS]{C.RESET} {bar} {pct:5.1f}%")
+                        sys.stdout.flush()
+            return True
+
+        try:
+            success = do_download()
+        except Exception as e:
+            import urllib.error as _ue
+            _is_ssl = isinstance(e, ssl.SSLError) or (
+                isinstance(e, _ue.URLError) and isinstance(e.reason, ssl.SSLError)
+            )
+            if _is_ssl:
+                print(f"\n{C.WARNING}[RETRY] SSL Error detected, retrying with unverified context...{C.RESET}")
+                try:
+                    success = do_download(ctx=ssl._create_unverified_context())
+                except Exception as e2:
+                    if platform.system() == "Windows":
+                        print(f"\n{C.WARNING}[RETRY] SSL retry failed ({e2}), attempting PowerShell fallback...{C.RESET}")
+                        ps_cmd = f"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri '{url}' -OutFile '{str(archive_path)}' -UserAgent 'Mozilla/5.0'"
+                        res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-NoProfile", "-Command", ps_cmd], capture_output=True)
+                        success = res.returncode == 0
+                    else:
+                        raise e2
+            elif platform.system() == "Windows":
+                print(f"\n{C.WARNING}[RETRY] Python download failed ({e}), attempting PowerShell fallback...{C.RESET}")
+                ps_cmd = f"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri '{url}' -OutFile '{str(archive_path)}' -UserAgent 'Mozilla/5.0'"
+                res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-NoProfile", "-Command", ps_cmd], capture_output=True)
+                success = res.returncode == 0
+            else:
+                raise e
+    except Exception as e:
+        print(f"\n{C.ERROR}[ERROR] Download failed: {e}{C.RESET}")
+        return False
+
+    if not success or not archive_path.exists():
+        print(f"\n{C.ERROR}[ERROR] FFmpeg download failed or file not found.{C.RESET}")
+        return False
+
+    print(f"\n{C.INFO}[EXTRACT] Extracting binaries...{C.RESET}")
+    try:
         if archive_ext == ".zip":
             import zipfile
             with zipfile.ZipFile(archive_path, 'r') as z:
@@ -390,7 +432,9 @@ def download_ffmpeg():
         archive_path.unlink()
         os.environ["PATH"] = str(BIN_DIR.absolute()) + os.pathsep + os.environ["PATH"]
         return True
-    except: return False
+    except Exception as e:
+        print(f"\n{C.ERROR}[ERROR] Extraction failed: {e}{C.RESET}")
+        return False
 
 def ensure_ffmpeg(auto_download=True):
     if check_ffmpeg(): return True
