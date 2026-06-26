@@ -6,16 +6,6 @@ All notable changes to the Mnemosyne project.
 
 ## [2.0] — 2026-06-25
 
-### Repository
-
-- **Layout flattened.** Old `v2.0/` and `v2.0-dev-files/` directories removed. `mnemosyne.py`, `mnemosyne.bat`, and `mnemosyne.sh` now sit at the repository root alongside `README.md`, `LICENSE`, `NOTICE.md`, and `CHANGELOG.md`.
-- **Tests moved** from `v2.0-dev-files/tests/` to `tests/`. Per-file `sys.path` hacks consolidated into a single `tests/conftest.py` that adds the repository root to `sys.path`.
-- **Runtime validation fixtures** moved from `v2.0-dev-files/runtime_validation/` to `tests/runtime_validation/`. Total fixture size ~21 MB (4 scenarios).
-- **GitHub Actions workflow** added: Python 3.10 / 3.11 / 3.12 matrix, branch filter for `push` and `pull_request` on `main`, pip cache enabled.
-- **`.gitignore`** at the repository root now also excludes `bin/`, `Lib/`, `Scripts/`, `.venv/`, `.pytest_cache/`, `__pycache__/`, `*.pyc`, and editor temp files explicitly to prevent accidental commits of developer-machine state.
-- **SPDX-License-Identifier** headers added to `mnemosyne.py`, `mnemosyne.bat`, and `mnemosyne.sh`.
-- **`AGENTS.md`** moved to the repository root from `v2.0-dev-files/` so it is visible to all contributors.
-
 ### Runtime
 
 - **FPS/Speed parsing fixed in live dashboard** (lines 2875–2881)
