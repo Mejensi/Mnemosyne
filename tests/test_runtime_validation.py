@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import io
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -99,6 +100,13 @@ class MnemosyneRuntimeValidationTests(unittest.TestCase):
         cls.ffprobe = mnemosyne.FFPROBE_CMD
         cls._clip_cache_dir = Path(tempfile.gettempdir()) / "mnemo_clip_cache"
         cls._clip_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def setUp(self):
+        mnemosyne.reset_interrupt_state()
+        logging.getLogger().setLevel(logging.INFO)
+
+    def tearDown(self):
+        mnemosyne.reset_interrupt_state()
 
     def _build_clip(self, cmd, key, dest):
         """Run an ffmpeg lavfi command, caching the result by parameter key.
@@ -838,7 +846,7 @@ class MnemosyneRuntimeValidationTests(unittest.TestCase):
             backup = base / "movie.mp4.bak"
             original.write_bytes(b"new")
             backup.write_bytes(b"old")
-            with pushd(base), patch.object(mnemosyne, "supports_interactive_input", return_value=True), patch("builtins.input", side_effect=["o"]):
+            with pushd(base), patch.object(mnemosyne, "supports_interactive_input", return_value=True), patch("builtins.input", side_effect=["o", "OVERWRITE"]):
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
                     result = mnemosyne.audit_orphaned_backups(recursive=False, auto_cleanup=True)
@@ -846,6 +854,21 @@ class MnemosyneRuntimeValidationTests(unittest.TestCase):
             self.assertEqual(original.read_bytes(), b"old")
             self.assertFalse(backup.exists())
             self.assertEqual(list(base.glob("movie.overwrite-hold-*.mp4")), [])
+
+    def test_audit_orphaned_backups_overwrite_requires_explicit_confirmation(self):
+        with managed_tempdir("mnemo_test_overwrite_guard_") as base:
+            original = base / "movie.mp4"
+            backup = base / "movie.mp4.bak"
+            original.write_bytes(b"new")
+            backup.write_bytes(b"old")
+            with pushd(base), patch.object(mnemosyne, "supports_interactive_input", return_value=True), patch("builtins.input", side_effect=["o", "NOPE"]):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    result = mnemosyne.audit_orphaned_backups(recursive=False, auto_cleanup=True)
+            self.assertFalse(result)
+            self.assertEqual(original.read_bytes(), b"new")
+            self.assertTrue(backup.exists())
+            self.assertIn("Cancelled", output.getvalue())
 
     def test_audit_orphaned_backups_purge_requires_explicit_confirmation(self):
         with managed_tempdir("mnemo_test_purge_guard_") as base:
@@ -1379,7 +1402,9 @@ class MnemosyneRuntimeValidationTests(unittest.TestCase):
                 videos = sorted(mnemosyne.iter_video_files(workdir, recursive=config.get("recursive", False)))
                 self.assertTrue(videos, f"No input video found for {scenario_dir.name}")
                 if scenario_dir.name == "scenario_04_recursive_bak":
-                    with self.assertLogs(level="ERROR") as logs:
+                    bak_file = videos[0].parent / (videos[0].name + ".bak")
+                    bak_file.touch()
+                    with self.assertLogs(logger="", level="ERROR") as logs:
                         result = mnemosyne.process_video(1, videos[0], "libx264", config)
                     self.assertIn("Stale backup already exists", "\n".join(logs.output))
                 else:
