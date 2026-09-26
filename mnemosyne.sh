@@ -15,6 +15,8 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MNEMOSYNE_LAUNCHER_DIR="$SCRIPT_DIR"
 
+printf "\033]0;Mnemosyne v2.1\007" 2>/dev/null || true
+
 if [ ! -f "$SCRIPT_DIR/mnemosyne.py" ]; then
     echo "[!] mnemosyne.py is required."
     echo "[!] Keep mnemosyne.py in the same folder as mnemosyne.sh."
