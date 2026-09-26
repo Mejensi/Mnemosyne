@@ -501,11 +501,11 @@ class MnemosyneLauncherTests(unittest.TestCase):
         ):
             self.assertEqual(mnemosyne.prompt_unverified_ffmpeg_override(["signature download failed"]), "once")
 
-    def test_unverified_override_accepts_remember_choice(self):
+    def test_unverified_override_declines_choice(self):
         with patch.object(mnemosyne, "supports_interactive_input", return_value=True), patch(
             "builtins.input", return_value="2"
         ):
-            self.assertEqual(mnemosyne.prompt_unverified_ffmpeg_override(["signature download failed"]), "remember")
+            self.assertFalse(mnemosyne.prompt_unverified_ffmpeg_override(["signature download failed"]))
 
     def test_host_environment_can_use_system_ffmpeg_when_allowed(self):
         with patch.object(mnemosyne, "FFMPEG_CMD", mnemosyne.FFMPEG_CMD), patch.object(

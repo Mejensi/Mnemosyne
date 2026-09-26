@@ -56,11 +56,34 @@ def test_verify_evermeet_signature_success(monkeypatch, tmp_path):
             return Result(0, mnemosyne.EVERMEET_GPG_FINGERPRINT)
         if '--verify' in cmd:
             calls['verify'] = True
-            return Result(0, '')
+            fp = mnemosyne.EVERMEET_GPG_FINGERPRINT.replace(' ', '').upper()
+            return Result(0, f"[GNUPG:] VALIDSIG {fp} 2026-01-01 1234567890")
         return Result(0, '')
     monkeypatch.setattr(mnemosyne.subprocess, 'run', fake_run)
     ok = mnemosyne.verify_evermeet_signature(archive, sig)
     assert ok is True
+
+
+def test_verify_evermeet_signature_foreign_key_rejected(monkeypatch, tmp_path):
+    archive = tmp_path / 'a.zip'
+    sig = tmp_path / 'a.zip.sig'
+    archive.write_text('archive')
+    sig.write_text('sig')
+    class Result:
+        def __init__(self, returncode, stdout=''):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = ''
+    def fake_run(cmd, capture_output=False, text=False, encoding=None, timeout=None):
+        if '--with-colons' in cmd:
+            return Result(0, mnemosyne.EVERMEET_GPG_FINGERPRINT)
+        if '--verify' in cmd:
+            # Simulates an attacker's valid signature from a different imported key
+            return Result(0, "[GNUPG:] VALIDSIG ATTACKERFINGERPRINT1234567890 2026-01-01")
+        return Result(0, '')
+    monkeypatch.setattr(mnemosyne.subprocess, 'run', fake_run)
+    ok = mnemosyne.verify_evermeet_signature(archive, sig)
+    assert ok is False
 
 
 def test_verify_evermeet_signature_failure(monkeypatch, tmp_path):
@@ -69,7 +92,6 @@ def test_verify_evermeet_signature_failure(monkeypatch, tmp_path):
     archive.write_text('archive')
     sig.write_text('sig')
     def fake_run(cmd, capture_output=False, text=False, encoding=None, timeout=None):
-        s = ' '.join(cmd)
         if '--with-colons' in cmd:
             return type('R', (), {'returncode': 0, 'stdout': 'BADFINGERPRINT'})
         if '--verify' in cmd:
@@ -78,3 +100,26 @@ def test_verify_evermeet_signature_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(mnemosyne.subprocess, 'run', fake_run)
     ok = mnemosyne.verify_evermeet_signature(archive, sig)
     assert ok is False
+
+
+def test_parse_checksum_gyan_raw_hash():
+    raw_hash = "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9"
+    parsed = mnemosyne.parse_checksum_file(raw_hash, "ffmpeg-release-essentials.zip")
+    assert parsed == raw_hash
+
+
+def test_load_json_file_corrupted(tmp_path):
+    bad_json = tmp_path / "bad.json"
+    bad_json.write_text("{\"unterminated\": ")
+    fallback = {"status": "ok"}
+    res = mnemosyne.load_json_file(bad_json, fallback)
+    assert res == fallback
+
+
+def test_atomic_write_json(tmp_path):
+    target = tmp_path / "data.json"
+    payload = {"hello": "world", "num": 42}
+    ok = mnemosyne.atomic_write_json(target, payload)
+    assert ok is True
+    loaded = mnemosyne.load_json_file(target, {})
+    assert loaded == payload

@@ -12,12 +12,12 @@ import time
 import mnemosyne
 
 
-def test_prompt_unverified_choice_remember(monkeypatch):
+def test_prompt_unverified_choice_options(monkeypatch):
     monkeypatch.setattr(mnemosyne, 'supports_interactive_input', lambda: True)
-    inputs = iter(['2'])
+    inputs = iter(['1', '2'])
     monkeypatch.setattr(builtins, 'input', lambda prompt='': next(inputs))
-    res = mnemosyne.prompt_unverified_ffmpeg_override(['fake: reason'])
-    assert res == 'remember'
+    assert mnemosyne.prompt_unverified_ffmpeg_override(['fake: reason']) == 'once'
+    assert mnemosyne.prompt_unverified_ffmpeg_override(['fake: reason']) is False
 
 
 def test_record_and_check_accepted_source(tmp_path):
@@ -31,11 +31,8 @@ def test_record_and_check_accepted_source(tmp_path):
             (mnemosyne.APP_DATA / 'ffmpeg_state.json').unlink()
         ok = mnemosyne.record_accepted_unverified_source(source)
         assert ok is True
-        assert mnemosyne.is_source_previously_accepted(source) is True
-        # check persistence
-        loaded = mnemosyne.load_ffmpeg_state()
-        assert 'accepted_unverified' in loaded
-        assert loaded['accepted_unverified'][0]['source_url'] == source['url']
+        # Permanent unverified bypass is disabled for security
+        assert mnemosyne.is_source_previously_accepted(source) is False
     finally:
         mnemosyne.APP_DATA = original_app
 
