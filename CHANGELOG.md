@@ -4,6 +4,46 @@ All notable changes to the Mnemosyne project.
 
 ---
 
+## [2.1] — 2026-09-26
+
+### Security & Hardening
+
+- **Eliminated permanent unverified bypass**: Removed the "Accept and remember" option from unverified FFmpeg download prompts. Unverified binaries can now only be accepted for the current session.
+- **Enforced pinned Evermeet GPG fingerprint verification**: `verify_evermeet_signature` now checks `--status-fd 1` output for `[GNUPG:] VALIDSIG` matching the pinned fingerprint (`20F6EA3E...`), defeating foreign-key keyring attacks.
+- **Fixed Windows SSL error abort**: Reordered SSL certificate validation before PowerShell download fallback to ensure connection aborts immediately on certificate failure.
+- **Enforced explicit overwrite confirmation**: `audit_orphaned_backups` requires typing `"OVERWRITE"` in full before restoring backups, preventing accidental data loss.
+- **Archive safety**: Added `MAX_EXTRACTED_BINARY_SIZE = 500 MB` ceiling to prevent zip bomb attacks during archive extraction.
+- **Command argument injection hardening**: Added `--` argument separator to `ffprobe` invocations to safely handle filenames beginning with a hyphen.
+- **Win32 64-bit handle safety**: Added explicit `restype = wintypes.HANDLE` and `argtypes` for `CreateFileW` and `CloseHandle` in `restore_file_metadata`.
+
+### Reliability & Crash Safety
+
+- **Atomic JSON journal writing**: Added `atomic_write_json` (`.tmp` + `flush` + `os.fsync` + `os.replace`) to prevent corrupted transaction journals during crashes.
+- **JSON decode error handling**: `load_json_file` now catches `json.JSONDecodeError` and `ValueError` in addition to `OSError`.
+- **Interrupt grace period**: Added `_ACTIVE_SWAPS` tracking in `handle_interrupt` giving in-flight atomic file swaps up to 2 seconds to complete cleanly on `SIGINT`.
+- **Unhandled worker exception protection**: Wrapped `f.result()` in `ThreadPoolExecutor` loop with `try/except` to protect final reporting and cleanup.
+- **Single-line SHA-256 parsing**: `parse_checksum_file` now handles bare single-line 64-character hash files (e.g. from gyan.dev).
+
+### Architecture & Types
+
+- **Typed Enums**: Replaced magic numbers and loose strings with `IntEnum` and `(str, Enum)` types:
+  - `ProcessResult`: `FAILED = 0`, `SUCCESS = 1`, `SKIPPED = 2`
+  - `DriveType`: `UNKNOWN = 0`, `REMOVABLE = 2`, `FIXED = 3`, etc.
+  - `StorageMode`: `APPDATA`, `PORTABLE`, `SESSION`, `CUSTOM`
+  - `SortOrder`: `NAME_AZ`, `NAME_ZA`, `SIZE_DESC`, `SIZE_ASC`
+  - `SystemFFmpegPolicy`: `PROMPT`, `ALLOW`, `DENY`
+  - `VideoCodec`: `AUTO`, `NVENC`, `AMF`, `QSV`, `VAAPI`, `VIDEOTOOLBOX`, `CPU`
+  - `ExitCode`: `SUCCESS = 0`, `ERROR = 1`, `INTERRUPTED = 130`
+- **Subfolder probing**: Added `probe_subfolder_videos` prompting users to enable recursive scanning (`-r`) when root directory contains no videos.
+- **Launchers**: Added `Mnemosyne v2.1` window title escape sequence to `mnemosyne.sh`.
+
+### Test Suite
+
+- Expanded test suite to 170+ tests covering drive safety, crash recovery, terminal clipping boundaries, CLI precedence, and Enum invariants.
+- Added `tests/README.md` test architecture and catalog guide.
+
+---
+
 ## [2.0] — 2026-06-25
 
 ### Runtime
