@@ -20,7 +20,7 @@ This software uses the following third-party components:
 | Platform | Source | Publisher |
 |----------|--------|-----------|
 | Windows | [BtbN FFmpeg Builds (GitHub Releases)](https://github.com/BtbN/FFmpeg-Builds/releases) | BtbN |
-| Linux | [BtbN FFmpeg Builds](https://github.com/BtbN/FFmpeg-Builds/releases) / [John Van Sickle](https://johnvansickle.com/ffmpeg/) | BtbN / John Van Sickle |
+| Linux | [BtbN FFmpeg Builds](https://github.com/BtbN/FFmpeg-Builds/releases) | BtbN |
 | macOS | [evermeet.cx FFmpeg](https://evermeet.cx/ffmpeg/) | Helmut K. C. Tessarek |
 
 All downloads are verified via SHA-256 checksum or GPG signature. On macOS, GPG signature verification is enforced.
