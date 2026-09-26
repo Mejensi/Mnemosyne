@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Mnemosyne V2.0 - The Keeper of Digital Memory
+Mnemosyne V2.1 - The Keeper of Digital Memory
 Copyright (C) 2026 Mejensi
 Licensed under GNU GPL v3.0
 
@@ -9,11 +9,12 @@ FFmpeg is licensed under the LGPL/GPL.
 
 SPDX-License-Identifier: GPL-3.0-or-later
 """
-import os, sys, platform, subprocess, shutil, time, datetime, json, argparse, threading, traceback, logging, random, re, hashlib, tempfile
+import os, sys, platform, subprocess, shutil, time, datetime, json, argparse, threading, traceback, logging, random, re, hashlib, tempfile, math
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Tuple, Dict, List, Optional
+from enum import Enum, IntEnum
 from logging.handlers import RotatingFileHandler
 
 if platform.system() == "Windows":
@@ -29,7 +30,7 @@ if platform.system() == "Windows":
     except (OSError, AttributeError, ValueError, TypeError) as _e:
         print(f"[Mnemosyne] Could not initialize Windows VT100 console mode: {_e}", file=sys.stderr)
 
-VERSION, APP_NAME = "2.0", "Mnemosyne"
+VERSION, APP_NAME = "2.1", "Mnemosyne"
 SYSTEM, IS_WINDOWS = platform.system(), platform.system() == "Windows"
 SESSION_ID = f"{os.getpid()}_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
 
@@ -44,7 +45,8 @@ def ensure_utf8_stdio():
             pass
 
 if IS_WINDOWS:
-    APP_DATA = Path(os.environ["APPDATA"]) / APP_NAME
+    appdata_dir = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    APP_DATA = Path(appdata_dir) / APP_NAME
 else:
     APP_DATA = Path.home() / ".mnemosyne"
 
@@ -107,7 +109,49 @@ SAVEABLE_CONFIG_KEYS = {
     "preserve_metadata",
     "system_ffmpeg_policy",
 }
-MANAGED_FFMPEG_STORAGE_MODES = {"appdata", "portable", "session", "custom"}
+class StorageMode(str, Enum):
+    APPDATA = "appdata"
+    PORTABLE = "portable"
+    SESSION = "session"
+    CUSTOM = "custom"
+
+MANAGED_FFMPEG_STORAGE_MODES = {m.value for m in StorageMode}
+
+class SortOrder(str, Enum):
+    NAME_AZ = "name_az"
+    NAME_ZA = "name_za"
+    SIZE_DESC = "size_desc"
+    SIZE_ASC = "size_asc"
+
+class SystemFFmpegPolicy(str, Enum):
+    PROMPT = "prompt"
+    ALLOW = "allow"
+    DENY = "deny"
+
+VALID_SYSTEM_FFMPEG_POLICIES = {p.value for p in SystemFFmpegPolicy}
+
+class VideoCodec(str, Enum):
+    AUTO = "auto"
+    NVENC = "h264_nvenc"
+    AMF = "h264_amf"
+    QSV = "h264_qsv"
+    VAAPI = "h264_vaapi"
+    VIDEOTOOLBOX = "h264_videotoolbox"
+    CPU = "libx264"
+
+class ExitCode(IntEnum):
+    SUCCESS = 0
+    ERROR = 1
+    INTERRUPTED = 130
+
+def get_safe_default_workers(codec="auto", is_removable=False):
+    if is_removable:
+        return 1
+    cpus = os.cpu_count() or 2
+    is_gpu = any(c in str(codec).lower() for c in ("nvenc", "amf", "qsv", "videotoolbox", "vaapi")) or codec == "auto"
+    if is_gpu:
+        return min(2, max(1, cpus // 4)) if cpus >= 4 else 1
+    return min(3, max(1, cpus // 4)) if cpus >= 4 else 1
 
 DEFAULT_CONFIG = {
     "profile_id": DEFAULT_PROFILE_ID,
@@ -115,18 +159,18 @@ DEFAULT_CONFIG = {
     "video_bitrate": "800k",
     "audio_bitrate": "128k",
     "target_fps": 30,
-    "max_workers": max(1, os.cpu_count() // 2) if os.cpu_count() else 2,
+    "max_workers": get_safe_default_workers("auto"),
     "recursive": False,
     "verify_frames": True,
     "auto_download_ffmpeg": True,
     "x264_preset": "medium",
     "ffmpeg_threads": 0,
-    "sort": "name_az",
+    "sort": SortOrder.NAME_AZ,
     "desktop_log": False,
     "auto_cleanup": True,
     "show_drive_warnings": True,
     "preserve_metadata": True,
-    "system_ffmpeg_policy": "prompt",
+    "system_ffmpeg_policy": SystemFFmpegPolicy.PROMPT,
 }
 VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm', '.ts', '.m4v'}
 STREAM_TYPES = ("video", "audio", "subtitle", "data", "attachment")
@@ -138,7 +182,6 @@ LAUNCHER_DIR_ENV = "MNEMOSYNE_LAUNCHER_DIR"
 FFMPEG_CMD = "ffmpeg"
 FFPROBE_CMD = "ffprobe"
 TARGET_PIXEL_FORMAT = "yuv420p"
-VALID_SYSTEM_FFMPEG_POLICIES = {"prompt", "allow", "deny"}
 EVERMEET_GPG_FINGERPRINT = "20F6EA3E0CFD6B4C53447A73476C4B611A660874"
 EVERMEET_GPG_KEY_URL = "https://evermeet.cx/ffmpeg/0x1A660874.asc"
 LOCK = threading.Lock()
@@ -150,28 +193,28 @@ UNICODE_OUTPUT_SAMPLE = "╔═║╝➤◆✦█░✓⚠"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 DISPLAY_STATE = {"mode": None, "last_compact_at": 0.0, "last_compact_snapshot": ""}
 MIN_LIVE_DASHBOARD_WIDTH = 68
-MIN_LIVE_DASHBOARD_HEIGHT = 14
+MIN_LIVE_DASHBOARD_HEIGHT = 18
 COMPACT_DASHBOARD_INTERVAL = 1.5
 
-MIN_VALID_VIDEO_BYTES = 10240        # 10 KB (minimum valid video file size)
-DOWNLOAD_CHUNK_SIZE = 1024 * 1024     # 1 MB (download and read chunk size)
-PROCESS_SPACE_MULTIPLIER = 1.25       # 25% overhead factor for processing space estimate
-PROCESS_SPACE_MIN_BYTES = 512 * 1024 * 1024  # 512 MB minimum processing space
+MIN_VALID_VIDEO_BYTES = 10240
+DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+PROCESS_SPACE_MULTIPLIER = 1.25
+PROCESS_SPACE_MIN_BYTES = 512 * 1024 * 1024
 
-FRAME_TOLERANCE_RATIO = 0.02          # 2% frame count tolerance
-ASPECT_RATIO_TOLERANCE = 0.03         # 3% aspect ratio deviation tolerance
-GEOMETRY_TOLERANCE_RATIO = 0.02       # 2% geometry/resolution deviation tolerance
-DURATION_TOLERANCE_MIN = 0.25         # 0.25s minimum duration tolerance
-DURATION_TOLERANCE_RATIO = 0.01       # 1% duration ratio tolerance
-DURATION_RATIO_MIN = 0.98             # min acceptable output/input duration ratio
-DURATION_RATIO_MAX = 1.02             # max acceptable output/input duration ratio
+FRAME_TOLERANCE_RATIO = 0.02
+ASPECT_RATIO_TOLERANCE = 0.03
+GEOMETRY_TOLERANCE_RATIO = 0.02
+DURATION_TOLERANCE_MIN = 0.25
+DURATION_TOLERANCE_RATIO = 0.01
+DURATION_RATIO_MIN = 0.98
+DURATION_RATIO_MAX = 1.02
 
-MAX_FFMPEG_TIMEOUT_SEC = 900          # 15 minutes
-BASE_DECODE_TIMEOUT_SEC = 60          # 1 minute default
-DECODE_TIMEOUT_MULTIPLIER = 4         # duration * 4 + 15s
-DECODE_TIMEOUT_ADDEND = 15            # base addend for decode timeout
-MIN_DECODE_TIMEOUT_SEC = 30           # minimum decode timeout
-PROCESS_TERMINATE_TIMEOUT = 2         # seconds to wait after terminate before kill
+MAX_FFMPEG_TIMEOUT_SEC = 900
+BASE_DECODE_TIMEOUT_SEC = 60
+DECODE_TIMEOUT_MULTIPLIER = 4
+DECODE_TIMEOUT_ADDEND = 15
+MIN_DECODE_TIMEOUT_SEC = 30
+PROCESS_TERMINATE_TIMEOUT = 2
 
 @dataclass
 class RunContext:
@@ -210,8 +253,22 @@ class ProcessManager:
                 logging.warning(f"Failed to kill process: {e}")
 PROCESS_MGR = ProcessManager()
 
-DRIVE_FIXED = 3
-DRIVE_REMOVABLE = 2
+class ProcessResult(IntEnum):
+    FAILED = 0
+    SUCCESS = 1
+    SKIPPED = 2
+
+class DriveType(IntEnum):
+    UNKNOWN = 0
+    NO_ROOT_DIR = 1
+    REMOVABLE = 2
+    FIXED = 3
+    REMOTE = 4
+    CDROM = 5
+    RAMDISK = 6
+
+DRIVE_FIXED = DriveType.FIXED
+DRIVE_REMOVABLE = DriveType.REMOVABLE
 
 class C:
     RESET = '\033[0m'
@@ -317,7 +374,7 @@ def strip_ansi(text):
     return ANSI_ESCAPE_RE.sub("", str(text or ""))
 
 def ellipsize_text(text, max_width):
-    text = str(text or "")
+    text = str(text or "").replace("\r", " ").replace("\n", " ")
     max_width = max(1, int(max_width))
     if len(text) <= max_width:
         return text
@@ -365,8 +422,11 @@ def emit_compact_dashboard(snapshot, completed, total):
 
 def render_live_dashboard(frame):
     with DISPLAY_LOCK:
+        lines = frame.splitlines()
+        cleared_lines = [line + "\033[K" for line in lines]
+        cleared_frame = "\n".join(cleared_lines) + "\033[K\n\033[J"
         prefix = "\033[2J\033[H" if DISPLAY_STATE["mode"] != "live" else "\033[H"
-        sys.stdout.write(prefix + frame + "\033[J")
+        sys.stdout.write(prefix + cleared_frame)
         sys.stdout.flush()
         DISPLAY_STATE["mode"] = "live"
         DISPLAY_STATE["last_compact_snapshot"] = ""
@@ -398,11 +458,19 @@ def setup_logging(debug=False, desktop_mode=False):
         log_file = get_runtime_dir() / "Mnemosyne_Log.txt"
 
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG if debug else logging.INFO)
+    level = logging.DEBUG if debug else logging.INFO
+    logger.setLevel(level)
     fmt = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', '%Y-%m-%d %H:%M:%S')
+    for h in logger.handlers:
+        try:
+            h.close()
+        except Exception:
+            pass
     logger.handlers.clear()
     fh = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=2, encoding='utf-8')
-    fh.setFormatter(fmt); fh.setLevel(logging.DEBUG); logger.addHandler(fh)
+    fh.setFormatter(fmt)
+    fh.setLevel(level)
+    logger.addHandler(fh)
     return log_file
 
 def enable_ansi():
@@ -644,6 +712,26 @@ def normalize_saved_config(raw_config=None):
         config["sort"] = DEFAULT_CONFIG["sort"]
     return config
 
+def atomic_write_json(path, data, indent=2):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_file = path.with_name(f"{path.name}.tmp.{os.getpid()}_{random.randint(1000, 9999)}")
+    try:
+        with open(tmp_file, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=indent, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_file, path)
+        return True
+    except Exception as exc:
+        if tmp_file.exists():
+            try:
+                tmp_file.unlink()
+            except OSError:
+                pass
+        logging.error(f"Failed to atomically write JSON to {path}: {exc}")
+        return False
+
 def load_json_file(path, fallback):
     path = Path(path)
     if not path.exists():
@@ -651,7 +739,7 @@ def load_json_file(path, fallback):
     try:
         with open(path, "r", encoding="utf-8") as handle:
             return json.load(handle)
-    except OSError as exc:
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
         logging.warning(f"Could not load JSON from {path}: {exc}")
         return json.loads(json.dumps(fallback))
 
@@ -682,77 +770,27 @@ def load_ffmpeg_state():
             "last_validation_error": str(entry.get("last_validation_error") or ""),
         })
     state["managed_installs"] = managed_installs
-    accepted = []
-    for entry in raw_state.get("accepted_unverified", []):
-        if not isinstance(entry, dict):
-            continue
-        accepted.append({
-            "source_url": str(entry.get("source_url") or ""),
-            "digest": str(entry.get("digest") or "").lower(),
-            "remembered_at": int(entry.get("remembered_at") or 0),
-        })
-    state["accepted_unverified"] = accepted
     return state
 
 def save_ffmpeg_state(state):
-    try:
-        normalized = load_ffmpeg_state()
-        normalized.update({
-            "preferred_storage_mode": normalize_storage_mode(state.get("preferred_storage_mode")),
-            "preferred_custom_path": str(state.get("preferred_custom_path") or "").strip(),
-            "managed_installs": state.get("managed_installs", []),
-            "accepted_unverified": state.get("accepted_unverified", []),
-        })
-        APP_DATA.mkdir(parents=True, exist_ok=True)
-        state_file = APP_DATA / 'ffmpeg_state.json'
-        with open(state_file, "w", encoding="utf-8") as handle:
-            json.dump(normalized, handle, indent=2, ensure_ascii=False)
-        return True
-    except OSError as exc:
-        logging.error(f"Failed to save FFmpeg state: {exc}")
-        return False
+    normalized = load_ffmpeg_state()
+    normalized.update({
+        "preferred_storage_mode": normalize_storage_mode(state.get("preferred_storage_mode")),
+        "preferred_custom_path": str(state.get("preferred_custom_path") or "").strip(),
+        "managed_installs": state.get("managed_installs", []),
+    })
+    state_file = APP_DATA / 'ffmpeg_state.json'
+    return atomic_write_json(state_file, normalized)
 
 
 def is_source_previously_accepted(source_meta):
-    """Check ffmpeg_state for previously remembered unverified sources that match this source_meta.
-
-    Matching uses source URL or a computed digest if present.
-    """
-    try:
-        ffmpeg_state = load_ffmpeg_state()
-        accepted = ffmpeg_state.get("accepted_unverified", []) or []
-        source_url = str(source_meta.get("url") or "")
-        source_digest = str(source_meta.get("digest") or "").lower()
-        for entry in accepted:
-            if entry.get("source_url") and entry.get("source_url") == source_url:
-                return True
-            if entry.get("digest") and source_digest and entry.get("digest") == source_digest:
-                return True
-        return False
-    except OSError:
-        return False
+    """Permanent unverified bypass is disabled for security."""
+    return False
 
 
 def record_accepted_unverified_source(source_meta):
-    """Persist a remembered acceptance of an unverified source into ffmpeg_state.
-
-    Stores: source_url, digest, remembered_at
-    """
-    try:
-        ffmpeg_state = load_ffmpeg_state()
-        accepted = ffmpeg_state.get("accepted_unverified", []) or []
-        source_url = str(source_meta.get("url") or "")
-        source_digest = str(source_meta.get("digest") or "").lower()
-        entry = {"source_url": source_url, "digest": source_digest, "remembered_at": int(time.time())}
-        for existing in accepted:
-            if existing.get("source_url") == entry["source_url"] or (entry["digest"] and existing.get("digest") == entry["digest"]):
-                return True
-        accepted.append(entry)
-        ffmpeg_state["accepted_unverified"] = accepted
-        return save_ffmpeg_state(ffmpeg_state)
-    except OSError as exc:
-        logging.error(f"Failed to record accepted unverified source: {exc}")
-        return False
+    """Permanent unverified recording is disabled for security."""
+    return True
 
 def get_script_path():
     script_file = globals().get("__file__")
@@ -828,11 +866,11 @@ def get_recommended_ffmpeg_storage_mode():
 
 def resolve_ffmpeg_install_dir(storage_mode, custom_path=""):
     storage_mode = normalize_storage_mode(storage_mode) or get_recommended_ffmpeg_storage_mode()
-    if storage_mode == "portable":
+    if storage_mode == StorageMode.PORTABLE:
         return get_launcher_dir() / "bin"
-    if storage_mode == "session":
+    if storage_mode == StorageMode.SESSION:
         return get_session_ffmpeg_dir()
-    if storage_mode == "custom":
+    if storage_mode == StorageMode.CUSTOM:
         custom_path = str(custom_path or "").strip()
         if not custom_path:
             raise ValueError("Custom FFmpeg storage requires a destination path.")
@@ -841,10 +879,10 @@ def resolve_ffmpeg_install_dir(storage_mode, custom_path=""):
 
 def describe_storage_mode(storage_mode):
     labels = {
-        "appdata": "AppData",
-        "portable": "Portable",
-        "session": "Runtime Folder",
-        "custom": "Custom Path",
+        StorageMode.APPDATA: "AppData",
+        StorageMode.PORTABLE: "Portable",
+        StorageMode.SESSION: "Runtime Folder",
+        StorageMode.CUSTOM: "Custom Path",
     }
     storage_mode = normalize_storage_mode(storage_mode)
     return labels.get(storage_mode, "Unknown")
@@ -882,8 +920,16 @@ def write_managed_ffmpeg_marker(install_dir, state_entry):
         "created_at": int(state_entry.get("created_at") or int(time.time())),
         "verification_status": state_entry.get("verification_status", "verified"),
     }
-    with open(marker_path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, ensure_ascii=False)
+    atomic_write_json(marker_path, payload)
+
+def read_managed_marker(install_dir):
+    marker_path = get_ffmpeg_marker_path(install_dir)
+    if not marker_path.is_file():
+        return None
+    data = load_json_file(marker_path, {})
+    if isinstance(data, dict) and data.get("app") == APP_NAME:
+        return data
+    return None
 
 def upsert_managed_ffmpeg_install(install_dir, storage_mode, source_identity, ffmpeg_state=None, verification_status="verified"):
     ffmpeg_state = ffmpeg_state or load_ffmpeg_state()
@@ -1141,26 +1187,35 @@ def get_temp_workspace(parent_dir):
 
 def iter_temp_workspaces(base_dir, recursive=False):
     base_dir = Path(base_dir)
-    if recursive:
-        candidates = base_dir.rglob(TEMP_WORKSPACE_MARKER)
-        seen = set()
-        for marker in candidates:
-            workspace = marker.parent
-            if workspace.parent.name != TEMP_WORKSPACE_NAME:
+    try:
+        if recursive:
+            candidates = base_dir.rglob(TEMP_WORKSPACE_MARKER)
+            seen = set()
+            for marker in candidates:
+                try:
+                    workspace = marker.parent
+                    if workspace.parent.name != TEMP_WORKSPACE_NAME:
+                        continue
+                    key = workspace_key(workspace)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    yield workspace
+                except (OSError, PermissionError):
+                    continue
+            return
+        workspace_root = base_dir / TEMP_WORKSPACE_NAME
+        if not workspace_root.exists():
+            return
+        for marker in workspace_root.glob(f"*/{TEMP_WORKSPACE_MARKER}"):
+            try:
+                workspace = marker.parent
+                if workspace.parent == workspace_root:
+                    yield workspace
+            except (OSError, PermissionError):
                 continue
-            key = workspace_key(workspace)
-            if key in seen:
-                continue
-            seen.add(key)
-            yield workspace
+    except (OSError, PermissionError):
         return
-    workspace_root = base_dir / TEMP_WORKSPACE_NAME
-    if not workspace_root.exists():
-        return
-    for marker in workspace_root.glob(f"*/{TEMP_WORKSPACE_MARKER}"):
-        workspace = marker.parent
-        if workspace.parent == workspace_root:
-            yield workspace
 
 def is_temp_workspace(path):
     path = Path(path)
@@ -1168,15 +1223,21 @@ def is_temp_workspace(path):
 
 def iter_video_backups(base_dir, recursive=False):
     base_dir = Path(base_dir)
-    pattern = base_dir.rglob("*") if recursive else base_dir.glob("*")
-    for path in pattern:
-        if not path.is_file():
-            continue
-        suffixes = [suffix.lower() for suffix in path.suffixes]
-        if len(suffixes) < 2 or suffixes[-1] != ".bak":
-            continue
-        if suffixes[-2] in VIDEO_EXTENSIONS:
-            yield path
+    try:
+        pattern = base_dir.rglob("*") if recursive else base_dir.glob("*")
+        for path in pattern:
+            try:
+                if not path.is_file():
+                    continue
+                suffixes = [suffix.lower() for suffix in path.suffixes]
+                if len(suffixes) < 2 or suffixes[-1] != ".bak":
+                    continue
+                if suffixes[-2] in VIDEO_EXTENSIONS:
+                    yield path
+            except (OSError, PermissionError):
+                continue
+    except (OSError, PermissionError):
+        return
 
 def get_backup_target_path(path):
     path = Path(path)
@@ -1196,7 +1257,7 @@ def load_transaction_journal(path):
     try:
         with open(journal_path, 'r', encoding='utf-8') as journal_file:
             return json.load(journal_file)
-    except OSError as exc:
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
         logging.warning(f"Could not read transaction journal {journal_path}: {exc}")
         return {
             "stage": "journal_unreadable",
@@ -1220,14 +1281,9 @@ def write_transaction_journal(path, **updates):
     payload.update(updates)
     payload["source_path"] = str(source_path)
     payload["updated_at"] = int(time.time())
-    try:
-        journal_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(journal_path, 'w', encoding='utf-8') as journal_file:
-            json.dump(payload, journal_file, indent=2, ensure_ascii=False)
+    if atomic_write_json(journal_path, payload):
         return journal_path
-    except OSError as exc:
-        logging.warning(f"Could not write transaction journal {journal_path}: {exc}")
-        return None
+    return None
 
 def clear_transaction_journal(path):
     journal_path = get_transaction_journal_path(path)
@@ -1311,14 +1367,20 @@ def restore_backup_with_mode(backup_path, mode):
 
 def iter_video_files(base_dir, recursive=False):
     base_dir = Path(base_dir)
-    pattern = base_dir.rglob("*") if recursive else base_dir.glob("*")
-    for path in pattern:
-        if not path.is_file():
-            continue
-        if is_path_in_temp_workspace(path):
-            continue
-        if path.suffix.lower() in VIDEO_EXTENSIONS:
-            yield path
+    try:
+        pattern = base_dir.rglob("*") if recursive else base_dir.glob("*")
+        for path in pattern:
+            try:
+                if not path.is_file():
+                    continue
+                if is_path_in_temp_workspace(path):
+                    continue
+                if path.suffix.lower() in VIDEO_EXTENSIONS:
+                    yield path
+            except (OSError, PermissionError):
+                continue
+    except (OSError, PermissionError):
+        return
 
 def iter_matching_paths(base_dir, pattern, recursive=False):
     base_dir = Path(base_dir)
@@ -1469,6 +1531,13 @@ def audit_orphaned_backups(recursive=False, auto_cleanup=True, target_dirs=None)
         else:
             print(f" {C.INFO}[+] Cancelled. Backup files are preserved.{C.RESET}")
             return False
+    if ans == 'o':
+        print(f"\n {C.ERROR}[!] WARNING: {len(baks)} current video file(s) will be OVERWRITTEN with backups!{C.RESET}")
+        print(f" {C.WARNING}    This cannot be undone. Type 'OVERWRITE' to confirm:{C.RESET}")
+        confirm = safe_input(f" {C.PRIMARY}>> {C.RESET}", "").strip()
+        if confirm != 'OVERWRITE':
+            print(f" {C.INFO}[+] Cancelled. Current files are preserved.{C.RESET}")
+            return False
     if ans in {'r', 'k', 'o'}:
         mode_map = {
             'r': "restore",
@@ -1511,15 +1580,8 @@ def build_saveable_config(config):
     return to_save
 
 def save_config(config):
-    try:
-        to_save = build_saveable_config(config)
-        APP_DATA.mkdir(parents=True, exist_ok=True)
-        with open(APP_CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(to_save, f, indent=4, ensure_ascii=False)
-        return True
-    except (OSError, AttributeError, ValueError, TypeError) as e:
-        logging.error(f"Failed to save config: {e}")
-        return False
+    to_save = build_saveable_config(config)
+    return atomic_write_json(APP_CONFIG_FILE, to_save, indent=4)
 
 def get_profile_label(profile_id):
     profile_id = normalize_profile_id(profile_id)
@@ -1604,44 +1666,238 @@ def draw_header(config, codec_name, briefing=None, width=70):
     output.append(f" {C.PRIMARY}{l}{m * (width+2)}{r}{C.RESET}")
     return "\n".join(output)
 
-def render_progress(label, percent, fps, speed, size_stats, eta="", label_width=20, bar_width=30, detail_width=None):
+def get_background_process_kwargs():
+    kwargs = {}
+    if IS_WINDOWS:
+        # 0x00000200 = CREATE_NEW_PROCESS_GROUP
+        # 0x00004000 = BELOW_NORMAL_PRIORITY_CLASS
+        kwargs["creationflags"] = 0x00000200 | 0x00004000
+    else:
+        def set_nice():
+            try:
+                os.nice(10)
+            except OSError:
+                pass
+        kwargs["preexec_fn"] = set_nice
+    return kwargs
+
+def format_speed_label(speed_raw):
+    text = str(speed_raw or "").strip()
+    if not text or text in ("0X", "0x", "-", "none", "None", ""):
+        return "..."
+    m = re.search(r"([\d.]+)\s*[xX]", text)
+    if m:
+        try:
+            val = float(m.group(1))
+            return f"Speed: {val:.1f}x"
+        except ValueError:
+            pass
+    return f"Speed: {text}"
+
+def format_fps_label(fps_raw):
+    text = str(fps_raw or "").strip()
+    if not text or text in ("-", "none", "None", "0", ""):
+        return "..."
+    try:
+        val = float(text)
+        return f"{val:.0f} FPS"
+    except ValueError:
+        return f"{text} FPS"
+
+def format_eta(seconds):
+    if seconds is None or seconds < 0 or math.isnan(seconds) or math.isinf(seconds):
+        return "estimating..."
+    seconds = int(round(seconds))
+    if seconds == 0:
+        return "0s"
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs:02d}s"
+    hours, mins = divmod(minutes, 60)
+    return f"{hours}h {mins:02d}m"
+
+def render_progress(label, percent, fps, speed, size_stats, eta="", stage="Encoding", stage_detail="", label_width=20, bar_width=30, detail_width=None):
     label_width = max(8, int(label_width))
     bar_width = max(10, int(bar_width))
-    detail_width = max(16, int(detail_width or max(label_width + bar_width, 32)))
+    detail_width = max(16, int(detail_width or max(label_width + bar_width + 24, 80)))
+    try:
+        pct_float = float(percent)
+        if math.isnan(pct_float) or math.isinf(pct_float):
+            pct_float = 0.0
+    except (ValueError, TypeError):
+        pct_float = 0.0
+    pct_clamped = max(0.0, min(100.0, pct_float))
     label = ellipsize_text(label, label_width)
     w = bar_width
-    f, e = int(w * percent / 100), w - int(w * percent / 100)
+    f = int(w * pct_clamped / 100)
+    e = w - f
     bar_char, bg_char, check_icon, arrow_icon, pipe_icon = get_progress_glyphs()
     
-    if percent >= 100: bar_color = C.SUCCESS
-    elif percent >= 50: bar_color = C.INFO
-    else: bar_color = C.PRIMARY
+    if pct_clamped >= 100 and stage in ("Done", "Completed"):
+        bar_color = C.SUCCESS
+    elif pct_clamped >= 99.0 or stage in ("Verifying", "Safety Swap"):
+        bar_color = C.INFO
+    elif pct_clamped >= 50:
+        bar_color = C.INFO
+    else:
+        bar_color = C.PRIMARY
     
     bar = f"{bar_color}{bar_char*f}{C.RESET}{C.MUTED}{bg_char*e}{C.RESET}"
-    if percent >= 100:
-        detail_text = ellipsize_text(size_stats, detail_width)
+    
+    if pct_clamped >= 100 and stage in ("Done", "Completed"):
+        detail_text = ellipsize_text(f"{size_stats} | [Completed]" if size_stats else "[Completed]", detail_width)
         return f" {C.SUCCESS}{check_icon}{C.RESET} {C.WHITE}{label:<{label_width}}{C.RESET} {bar} {C.SUCCESS}DONE{C.RESET}\n   {C.MUTED}{pipe_icon} {detail_text}{C.RESET}"
+    
+    spd_str = format_speed_label(speed)
+    fps_str = format_fps_label(fps)
+    eta_str = f"ETA: {eta}" if eta else "ETA: estimating..."
+    
+    stage_str = stage
+    if stage_detail:
+        stage_str = f"{stage}: {stage_detail}"
+    
+    bullet_sep = " \u2022 " if supports_unicode_output() else " | "
+    verify_icon = "\u2726" if supports_unicode_output() else "*"
+
+    if stage in ("Verifying", "Safety Swap"):
+        metric_parts = [spd_str, fps_str] if fps_str != "..." else []
+        status_line = f"[{stage_str}]"
+        if metric_parts:
+            status_line = f"{bullet_sep.join(metric_parts)} | {status_line}"
+        if eta and eta != "estimating...":
+            status_line = f"{status_line} | {eta_str}"
+        detail_text = ellipsize_text(status_line, detail_width)
+        return f" {C.INFO}{verify_icon}{C.RESET} {C.WHITE}{label:<{label_width}}{C.RESET} {bar} {C.INFO}{pct_clamped:5.1f}%{C.RESET}\n   {C.MUTED}{pipe_icon} {detail_text}{C.RESET}"
     else:
-        fps_disp = fps if fps != "-" else "..."
-        spd_disp = speed if speed != "0X" else "..."
-        eta_disp = f" | {eta}" if eta else ""
-        detail_text = ellipsize_text(f"{spd_disp} | {fps_disp} fps{eta_disp}", detail_width)
-        return f" {C.PRIMARY}{arrow_icon}{C.RESET} {C.WHITE}{label:<{label_width}}{C.RESET} {bar} {C.INFO}{percent:5.1f}%{C.RESET}\n   {C.MUTED}{pipe_icon} {detail_text}{C.RESET}"
+        status_line = f"{spd_str}{bullet_sep}{fps_str} | {eta_str} | [{stage_str}]"
+        detail_text = ellipsize_text(status_line, detail_width)
+        return f" {C.PRIMARY}{arrow_icon}{C.RESET} {C.WHITE}{label:<{label_width}}{C.RESET} {bar} {C.INFO}{pct_clamped:5.1f}%{C.RESET}\n   {C.MUTED}{pipe_icon} {detail_text}{C.RESET}"
 
 class WorkerStats:
     def __init__(self):
         self.stats = {}
         self.starts = {}
-    def update(self, wid, fn, pct, fps, speed, size_stats=""):
+        self.history = {}
+        self.completed_durations = []
+
+    def update(self, wid, fn, pct, fps, speed, size_stats="", stage="Encoding", stage_detail=""):
         with LOCK:
-            if wid not in self.starts: self.starts[wid] = time.time()
-            self.stats[wid] = {'fn': fn, 'pct': pct, 'fps': fps, 'speed': speed, 'size': size_stats, 'start': self.starts[wid]}
+            now = time.time()
+            is_new_file = wid not in self.starts or self.stats.get(wid, {}).get('fn') != fn or pct == 0.0
+            if is_new_file:
+                self.starts[wid] = now
+                self.history[wid] = []
+
+            try:
+                pct_val = float(pct)
+            except (ValueError, TypeError):
+                pct_val = 0.0
+
+            hist = self.history.setdefault(wid, [])
+            hist.append((now, pct_val))
+            while len(hist) > 25 or (len(hist) > 2 and now - hist[0][0] > 20.0):
+                hist.pop(0)
+
+            eta_seconds = self._calc_worker_eta(wid, now, pct_val)
+
+            formatted_speed = format_speed_label(speed)
+            formatted_fps = format_fps_label(fps)
+
+            self.stats[wid] = {
+                'fn': fn,
+                'pct': pct_val,
+                'fps': fps,
+                'fps_disp': formatted_fps,
+                'speed': speed,
+                'speed_disp': formatted_speed,
+                'size': size_stats,
+                'stage': stage,
+                'stage_detail': stage_detail,
+                'start': self.starts[wid],
+                'eta_seconds': eta_seconds,
+            }
+
+    def _calc_worker_eta(self, wid, now, current_pct):
+        if current_pct <= 1.0 or current_pct >= 100.0:
+            return None
+        hist = self.history.get(wid, [])
+        if not hist or len(hist) < 2:
+            elapsed = now - self.starts.get(wid, now)
+            if elapsed < 2.0 or current_pct < 1.0:
+                return None
+            rate = current_pct / max(0.1, elapsed)
+            return (100.0 - current_pct) / max(0.01, rate)
+
+        oldest_t, oldest_pct = hist[0]
+        recent_dt = now - oldest_t
+        recent_dpct = current_pct - oldest_pct
+        if recent_dt > 1.0 and recent_dpct > 0.05:
+            recent_rate = recent_dpct / recent_dt
+        else:
+            recent_rate = None
+
+        total_dt = now - self.starts.get(wid, now)
+        total_rate = current_pct / max(0.1, total_dt) if total_dt > 0.5 else None
+
+        if recent_rate and total_rate:
+            rate = (0.7 * recent_rate) + (0.3 * total_rate)
+        elif recent_rate:
+            rate = recent_rate
+        elif total_rate:
+            rate = total_rate
+        else:
+            return None
+
+        if rate <= 0.001:
+            return None
+        return max(0.0, (100.0 - current_pct) / rate)
+
+    def record_completed(self, wid, elapsed):
+        with LOCK:
+            if elapsed and elapsed > 0:
+                self.completed_durations.append(elapsed)
+                if len(self.completed_durations) > 50:
+                    self.completed_durations.pop(0)
+
+    def get_queue_eta_formatted(self, total, completed):
+        with LOCK:
+            if completed >= total or total <= 0:
+                return "0s"
+            in_progress = [s for s in self.stats.values() if 0 < s.get('pct', 0) < 100]
+            active_count = len(in_progress)
+            remaining_tasks = total - completed
+
+            if not self.completed_durations and not in_progress:
+                return "estimating..."
+
+            if self.completed_durations:
+                avg_file_time = sum(self.completed_durations) / len(self.completed_durations)
+            else:
+                rates = []
+                for s in in_progress:
+                    start_t = s.get('start', time.time())
+                    pct = s.get('pct', 0)
+                    if pct > 5:
+                        rates.append((time.time() - start_t) / (pct / 100.0))
+                avg_file_time = sum(rates) / len(rates) if rates else None
+
+            if not avg_file_time:
+                return "estimating..."
+
+            concurrency = max(1, active_count)
+            total_remaining_seconds = (remaining_tasks * avg_file_time) / concurrency
+            return format_eta(total_remaining_seconds)
+
     def get_all(self):
         with LOCK: return self.stats.copy()
+
     def remove_worker(self, wid):
         with LOCK:
             self.stats.pop(wid, None)
             self.starts.pop(wid, None)
+            self.history.pop(wid, None)
 
 # NOTE on st_ctime cross-platform behavior (FIX #13 documentation):
 #   Windows  — path.stat().st_ctime returns the file CREATION time (correct for SetFileTime)
@@ -1657,12 +1913,23 @@ def restore_file_metadata(path, metadata):
         try:
             import ctypes
             from ctypes import wintypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.CreateFileW.argtypes = [
+                wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE
+            ]
+            kernel32.CreateFileW.restype = wintypes.HANDLE
+            kernel32.SetFileTime.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+            kernel32.SetFileTime.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
             ts = int((ctime + 11644473600) * 10000000)
             ft = wintypes.FILETIME(ts & 0xFFFFFFFF, ts >> 32)
-            h = ctypes.windll.kernel32.CreateFileW(str(path), 0x40000000 | 0x0100, 0, None, 3, 0, None)
-            if h != -1:
-                ctypes.windll.kernel32.SetFileTime(h, ctypes.byref(ft), None, None)
-                ctypes.windll.kernel32.CloseHandle(h)
+            h = kernel32.CreateFileW(str(path), 0x40000000 | 0x0100, 0, None, 3, 0, None)
+            invalid_handle = wintypes.HANDLE(-1).value
+            if h and h != invalid_handle and h != -1:
+                kernel32.SetFileTime(h, ctypes.byref(ft), None, None)
+                kernel32.CloseHandle(h)
         except (OSError, AttributeError, ValueError, TypeError) as e:
             logging.debug(f"Could not set Windows creation time for {path}: {e}")
     # On Linux/macOS: creation time cannot be set via standard Python APIs.
@@ -1797,6 +2064,7 @@ def build_chapter_descriptor(chapter):
 
 def get_media_info(path, timeout=15, count_frames=False):
     try:
+        quick_info = {}
         if count_frames:
             quick_info = get_media_info(path, timeout=timeout, count_frames=False)
             duration = float(quick_info.get("duration", 0.0) or 0.0)
@@ -1808,17 +2076,29 @@ def get_media_info(path, timeout=15, count_frames=False):
             "-show_format",
             "-show_streams",
             "-show_chapters",
-            "-of", "json", str(path)
+            "-of", "json",
+            "--", str(path)
         ])
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-            timeout=timeout,
-        )
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=timeout,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            if count_frames and quick_info:
+                logging.warning(f"get_media_info: ffprobe with count_frames timed out or failed for {path} ({exc}); falling back to quick_info")
+                return quick_info
+            logging.warning(f"get_media_info: ffprobe failed for {path}: {exc}")
+            return {}
+
         if result.returncode != 0 or not result.stdout.strip():
+            if count_frames and quick_info:
+                logging.warning(f"get_media_info: ffprobe with count_frames failed or timed out for {path}; falling back to quick_info")
+                return quick_info
             return {}
         data = json.loads(result.stdout)
         streams = data.get("streams", [])
@@ -1898,8 +2178,8 @@ def build_scale_filter(target_height, use_vaapi=False):
     target_height = int(target_height)
     if use_vaapi:
         return f"format=nv12,hwupload,scale_vaapi=w=-2:h={target_height}:force_original_aspect_ratio=decrease"
-    height_expr = f"min(ih\\,{target_height})"
-    width_expr = f"trunc({height_expr}*dar/2)*2"
+    height_expr = f"max(2\\,trunc(min(ih\\,{target_height})/2)*2)"
+    width_expr = f"max(2\\,trunc({height_expr}*dar/2)*2)"
     return f"scale={width_expr}:{height_expr},setsar=1"
 
 def get_expected_output_fps(input_info, config):
@@ -1951,14 +2231,6 @@ DEFAULT_FFMPEG_DOWNLOADS = {
             "checksum_algorithm": "sha256",
             "checksum_url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/checksums.sha256",
             "checksum_name": "ffmpeg-master-latest-linux64-gpl.tar.xz",
-        },
-        {
-            "kind": "archive",
-            "url": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
-            "archive_name": "ffmpeg-release-amd64-static.tar.xz",
-            "checksum_algorithm": "md5",
-            "checksum_url": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz.md5",
-            "checksum_name": "ffmpeg-release-amd64-static.tar.xz",
         },
     ],
     "Darwin": {
@@ -2090,7 +2362,10 @@ def iter_ffmpeg_candidate_pairs(ffmpeg_state=None):
         ffmpeg_path = directory / exe_name
         ffprobe_path = directory / probe_name
         if ffmpeg_path.exists() and ffprobe_path.exists():
-            if managed_entry and managed_entry.get("verification_status") == "user_override_unverified":
+            marker_data = read_managed_marker(directory)
+            is_managed = (managed_entry is not None) or (label == "runtime/bin") or (marker_data is not None)
+            origin = "managed" if is_managed else "system"
+            if is_managed and managed_entry and managed_entry.get("verification_status") == "user_override_unverified":
                 if not validate_ffmpeg_pair(ffmpeg_path, ffprobe_path):
                     managed_entry["last_validation_error"] = "Unverified managed FFmpeg failed validation on startup."
                     remove_managed_ffmpeg_install(managed_entry, ffmpeg_state)
@@ -2098,9 +2373,9 @@ def iter_ffmpeg_candidate_pairs(ffmpeg_state=None):
             yield {
                 "ffmpeg_path": ffmpeg_path,
                 "ffprobe_path": ffprobe_path,
-                "origin": "managed",
+                "origin": origin,
                 "label": label,
-                "managed_entry": managed_entry,
+                "managed_entry": managed_entry if is_managed else None,
             }
     system_ffmpeg = shutil.which("ffmpeg")
     system_ffprobe = shutil.which("ffprobe")
@@ -2131,9 +2406,9 @@ def iter_ffmpeg_candidate_pairs(ffmpeg_state=None):
 
 def allow_system_ffmpeg_candidate(candidate, policy=None):
     policy = normalize_system_ffmpeg_policy(policy)
-    if policy == "allow":
+    if policy == SystemFFmpegPolicy.ALLOW:
         return True
-    if policy == "deny":
+    if policy == SystemFFmpegPolicy.DENY:
         logging.info(
             "Skipping system FFmpeg candidate because system_ffmpeg_policy=deny: "
             f"{candidate['ffmpeg_path']} | {candidate['ffprobe_path']}"
@@ -2166,10 +2441,12 @@ def compute_file_digest(path, algorithm):
 
 def parse_checksum_file(text, target_name):
     target_name = os.path.basename(target_name)
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
+    lines = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    if len(lines) == 1:
+        parts = lines[0].split()
+        if len(parts) == 1 and len(parts[0]) in (32, 40, 64, 128) and all(c in "0123456789abcdefABCDEF" for c in parts[0]):
+            return parts[0].strip().lower()
+    for line in lines:
         parts = line.split()
         if len(parts) < 2:
             continue
@@ -2242,12 +2519,17 @@ def download_url_to_file(url, destination, show_progress=False):
         is_ssl_error = isinstance(e, ssl.SSLError) or (
             isinstance(e, urllib.error.URLError) and isinstance(e.reason, ssl.SSLError)
         )
-        if IS_WINDOWS:
-            print(f"\n{C.WARNING}[RETRY] Python download failed, attempting PowerShell fallback...{C.RESET}")
-            return powershell_download(url, destination)
+        if destination.exists():
+            try:
+                destination.unlink()
+            except OSError:
+                pass
         if is_ssl_error:
             print(f"\n{C.ERROR}[SSL ERROR] Cannot verify download certificate. Aborted for security.{C.RESET}")
             return False
+        if IS_WINDOWS:
+            print(f"\n{C.WARNING}[RETRY] Python download failed, attempting PowerShell fallback...{C.RESET}")
+            return powershell_download(url, destination)
         return False
 
 def download_text(url):
@@ -2291,6 +2573,8 @@ def verify_download_manifest_entry(archive_path, source):
         return False
     return True
 
+MAX_EXTRACTED_BINARY_SIZE = 500 * 1024 * 1024
+
 def extract_binaries_from_archive(archive_path, binary_names, destination_dir):
     destination_dir = Path(destination_dir)
     destination_dir.mkdir(parents=True, exist_ok=True)
@@ -2305,6 +2589,8 @@ def extract_binaries_from_archive(archive_path, binary_names, destination_dir):
                 key = member_name.lower()
                 if key not in targets:
                     continue
+                if member.file_size > MAX_EXTRACTED_BINARY_SIZE:
+                    raise RuntimeError(f"Archive entry exceeds maximum allowed size: {member_name}")
                 with archive.open(member) as src, open(targets[key], 'wb') as dst:
                     shutil.copyfileobj(src, dst)
                 if not IS_WINDOWS:
@@ -2318,6 +2604,8 @@ def extract_binaries_from_archive(archive_path, binary_names, destination_dir):
                 key = member_name.lower()
                 if key not in targets or not member.isfile():
                     continue
+                if member.size > MAX_EXTRACTED_BINARY_SIZE:
+                    raise RuntimeError(f"Archive entry exceeds maximum allowed size: {member_name}")
                 src = archive.extractfile(member)
                 if src is None:
                     continue
@@ -2381,21 +2669,32 @@ def verify_evermeet_signature(archive_path, signature_path):
         if import_result.returncode != 0:
             logging.error(import_result.stderr.strip())
             return False
+        expected_fp = EVERMEET_GPG_FINGERPRINT.replace(" ", "").upper()
         fingerprint_result = subprocess.run(
             [gpg, "--batch", "--homedir", str(gnupg_home), "--with-colons", "--fingerprint"],
             capture_output=True,
             text=True,
         )
-        if EVERMEET_GPG_FINGERPRINT not in fingerprint_result.stdout.replace(":", "").upper():
+        if expected_fp not in fingerprint_result.stdout.replace(":", "").upper():
             logging.error("Evermeet signing key fingerprint mismatch")
             return False
         verify_result = subprocess.run(
-            [gpg, "--batch", "--homedir", str(gnupg_home), "--verify", str(signature_path), str(archive_path)],
+            [gpg, "--batch", "--homedir", str(gnupg_home), "--status-fd", "1", "--verify", str(signature_path), str(archive_path)],
             capture_output=True,
             text=True,
         )
         if verify_result.returncode != 0:
             logging.error(verify_result.stderr.strip())
+            return False
+        has_valid_sig = False
+        for line in (verify_result.stdout or "").splitlines():
+            if line.startswith("[GNUPG:] VALIDSIG "):
+                parts = line.split()
+                if len(parts) >= 3 and parts[2].upper() == expected_fp:
+                    has_valid_sig = True
+                    break
+        if not has_valid_sig:
+            logging.error("Valid signature found, but not from pinned Evermeet fingerprint")
             return False
         return True
     finally:
@@ -2503,7 +2802,7 @@ def extract_ffmpeg_source(source, temp_dir, install_stage_dir, binary_names, all
                 # Fallback: scrape evermeet homepage for current version and build direct sig URL
                 try:
                     index_page = download_text("https://evermeet.cx/ffmpeg/")
-                    archive_name = asset["binary_name"]  # ffmpeg or ffprobe
+                    archive_name = asset["binary_name"]
                     import re
                     sig_pattern = re.compile(rf'href="({re.escape(archive_name)}-[\d.-]+[^"]*\.zip\.sig)"')
                     match = sig_pattern.search(index_page)
@@ -2554,18 +2853,16 @@ def prompt_unverified_ffmpeg_override(failed_sources):
     for item in failed_sources:
         print(f"    - {item}{C.RESET}")
     print(f"{C.WARNING}Continuing with an unverified archive may install tampered or corrupt binaries.{C.RESET}")
-    print(f"{C.INFO}Mnemosyne will still quarantine, validate, and atomically roll back failed binaries.{C.RESET}")
+    print(f"{C.WARNING}Warning: Mnemosyne will execute downloaded binaries on your machine to test compatibility.{C.RESET}")
     print("")
-    print("Options:\n  1) Accept once (install this time only)\n  2) Accept and remember this source (avoid future prompts)\n  3) Decline")
+    print("Options:\n  1) Accept once (install for this session only)\n  2) Decline")
     while True:
-        answer = safe_input(f" {C.PRIMARY}>> Choose 1, 2, or 3: {C.RESET}", "3").strip()
+        answer = safe_input(f" {C.PRIMARY}>> Choose 1 or 2: {C.RESET}", "2").strip()
         if answer == "1":
             return 'once'
-        if answer == "2":
-            return 'remember'
-        if answer == "3":
+        if answer in {"2", "3", "d", "n", "q"}:
             return False
-        print(f"{C.WARNING}Invalid choice. Enter 1, 2 or 3.{C.RESET}")
+        print(f"{C.WARNING}Invalid choice. Enter 1 or 2.{C.RESET}")
 
 def install_staged_ffmpeg(install_stage_dir, install_dir, binary_names, storage_mode, source, ffmpeg_state, verification_status="verified"):
     if not validate_staged_ffmpeg_install(install_stage_dir, binary_names):
@@ -2589,7 +2886,7 @@ def download_ffmpeg(storage_mode="", custom_install_path="", ffmpeg_state=None):
     storage_mode = normalize_storage_mode(storage_mode) or get_recommended_ffmpeg_storage_mode()
     install_dir = resolve_ffmpeg_install_dir(storage_mode, custom_install_path)
     install_dir.parent.mkdir(parents=True, exist_ok=True)
-    FFMPEG_DOWNLOAD_SIZE_BYTES = 800 * 1024 * 1024  # 800 MB for FFmpeg download
+    FFMPEG_DOWNLOAD_SIZE_BYTES = 800 * 1024 * 1024
     ffmpeg_space_needed = FFMPEG_DOWNLOAD_SIZE_BYTES
     if not warn_if_space_is_low(install_dir.parent, ffmpeg_space_needed, "FFmpeg download"):
         return False
@@ -2601,13 +2898,8 @@ def download_ffmpeg(storage_mode="", custom_install_path="", ffmpeg_state=None):
             shutil.rmtree(install_stage_dir, ignore_errors=True)
         temp_dir = get_runtime_work_dir(f"ffmpeg_download_{SESSION_ID}_{index}")
         try:
-            # If this source was previously accepted by the user as unverified, allow unverified install automatically
-            allow_unverified = bool(is_source_previously_accepted(source))
-            if allow_unverified:
-                logging.info(f"Using previously-accepted unverified source: {source.get('url') or source.get('kind')}")
-            extract_ffmpeg_source(source, temp_dir, install_stage_dir, binary_names, allow_unverified=allow_unverified)
-            verification_status = "verified" if not allow_unverified else "user_override_remembered"
-            install_staged_ffmpeg(install_stage_dir, install_dir, binary_names, storage_mode, source, ffmpeg_state, verification_status=verification_status)
+            extract_ffmpeg_source(source, temp_dir, install_stage_dir, binary_names, allow_unverified=False)
+            install_staged_ffmpeg(install_stage_dir, install_dir, binary_names, storage_mode, source, ffmpeg_state, verification_status="verified")
             return check_ffmpeg_with_policy("allow", ffmpeg_state=ffmpeg_state)
         except Exception as exc:
             failed_sources.append(f"{source.get('url') or source.get('kind')}: {exc}")
@@ -2621,11 +2913,6 @@ def download_ffmpeg(storage_mode="", custom_install_path="", ffmpeg_state=None):
     if not prompt_result:
         return False
     source = sources[0]
-    if prompt_result == 'remember':
-        try:
-            record_accepted_unverified_source(source)
-        except Exception:
-            pass
     install_stage_dir = install_dir.parent / f"{install_dir.name}.unverified.{SESSION_ID}"
     if install_stage_dir.exists():
         shutil.rmtree(install_stage_dir, ignore_errors=True)
@@ -2643,7 +2930,7 @@ def download_ffmpeg(storage_mode="", custom_install_path="", ffmpeg_state=None):
         )
         return check_ffmpeg_with_policy("allow", ffmpeg_state=ffmpeg_state)
     except Exception as exc:
-        print(f"\n{C.ERROR}[ERROR] Unverified FFmpeg failed quarantine validation: {exc}{C.RESET}")
+        print(f"\n{C.ERROR}[ERROR] Unverified FFmpeg failed validation: {exc}{C.RESET}")
         return False
     finally:
         if install_stage_dir.exists():
@@ -2656,7 +2943,7 @@ def _test_encoder(codec, return_details=False):
     details = {"cmd": [], "returncode": None, "stderr_tail": "n/a"}
     try:
         cmd = [FFMPEG_CMD, "-f", "lavfi", "-i", "nullsrc=s=256x256:r=30", "-t", "1"]
-        if codec == "h264_vaapi":
+        if codec == VideoCodec.VAAPI:
             vaapi_device = find_vaapi_device()
             if not vaapi_device:
                 details["stderr_tail"] = "VAAPI requested but no render node was found."
@@ -2765,16 +3052,7 @@ def comparable_copy_stream(stream):
 def compare_audio_streams(in_info, out_info, config):
     in_audio = [comparable_audio_stream(stream) for stream in in_info.get("audio_streams", [])]
     out_audio = [comparable_audio_stream(stream) for stream in out_info.get("audio_streams", [])]
-    if in_audio != out_audio:
-        return False
-    target_audio_bitrate = parse_bitrate(config.get('audio_bitrate'))
-    if target_audio_bitrate is None:
-        return True
-    for stream in out_info.get("audio_streams", []):
-        bitrate = stream.get("bitrate")
-        if bitrate is not None and bitrate > target_audio_bitrate:
-            return False
-    return True
+    return in_audio == out_audio
 
 def compare_copy_streams(in_info, out_info, key):
     in_streams = [comparable_copy_stream(stream) for stream in in_info.get(key, [])]
@@ -2894,7 +3172,7 @@ def verify_media_decode(path, info=None):
         return False
     return True
 
-def verify_output(inp, outp, config, return_details=False):
+def verify_output(inp, outp, config, return_details=False, progress_cb=None):
     details = {
         "metadata_ok": False,
         "decode_ok": False,
@@ -2903,6 +3181,8 @@ def verify_output(inp, outp, config, return_details=False):
     if not outp.exists() or outp.stat().st_size < MIN_VALID_VIDEO_BYTES:
         return (False, details) if return_details else False
     try:
+        if progress_cb:
+            progress_cb("Streams & Geometry")
         frame_probe = bool(config.get('verify_frames', True))
         in_info = get_media_info(inp, count_frames=frame_probe)
         out_info = get_media_info(outp, count_frames=frame_probe)
@@ -2982,6 +3262,14 @@ def verify_output(inp, outp, config, return_details=False):
         elif config.get('verify_frames', True):
             logging.warning(f"verify_output: frame counts unavailable for strict comparison on {inp.name}; decode gate remains required")
 
+        logging.debug(
+            f"verify_output [{inp.name}] checks: "
+            f"dur={dur_ok}(ratio={duration_ratio:.4f}), codec={codec_ok}({out_info.get('video_codec')}), "
+            f"pix_fmt={pix_fmt_ok}({out_info.get('video_pix_fmt')}), fps={fps_ok}(out={out_fps}/exp={expected_fps}), "
+            f"geometry={geometry_ok}({out_info.get('width')}x{out_info.get('height')}), stream={stream_ok}, "
+            f"chapter={chapter_ok}, frame={frame_ok}(out={out_frames}/exp={expected_frames})"
+        )
+
         metadata_ok = (
             dur_ok and codec_ok and pix_fmt_ok and fps_ok and height_ok and width_ok and display_ratio_ok and geometry_ok
             and stream_ok and chapter_ok and frame_ok
@@ -3019,11 +3307,16 @@ def verify_output(inp, outp, config, return_details=False):
                 f"duration_ratio={duration_ratio:.4f}, "
                 f"expected_frames={expected_frames}, output_frames={out_frames}"
             )
+            logging.debug(f"verify_output [{inp.name}] Input Metadata Dump: {json.dumps(in_info, default=str)}")
+            logging.debug(f"verify_output [{inp.name}] Output Metadata Dump: {json.dumps(out_info, default=str)}")
+
         # If frame counting was already performed successfully, the file has
         # already been fully decoded — skip redundant decode verification.
         if details.get("frame_check") == "counted" and out_frames > 0:
             details["decode_ok"] = True
         elif metadata_ok:
+            if progress_cb:
+                progress_cb("Frame Decode Integrity")
             details["decode_ok"] = verify_media_decode(outp, out_info)
         success = details["metadata_ok"] and details["decode_ok"]
         return (success, details) if return_details else success
@@ -3032,27 +3325,42 @@ def verify_output(inp, outp, config, return_details=False):
         return (False, details) if return_details else False
 
 def process_video(wid, vpath, codec, config):
+    if _INTERRUPT_HANDLED:
+        return False
+    t_start = time.time()
+    thread_name = threading.current_thread().name
+    if "MnemoWorker_" in thread_name:
+        try:
+            wid = int(thread_name.split("_")[-1]) + 1
+        except (ValueError, TypeError):
+            pass
     fn = vpath.name
     s_fps, s_speed, pct = "-", "0X", 0.0
-    worker_stats.update(wid, fn, 0.0, s_fps, s_speed, "")
+    worker_stats.update(wid, fn, 0.0, s_fps, s_speed, "", stage="Initializing", stage_detail="Probing input")
     logging.info(f"[Worker {wid}] Started processing: {fn}")
 
     try:
         input_info = get_media_info(vpath)
         if not input_info.get("has_video"):
             logging.error(f"Could not identify a primary video stream for {fn}")
-            worker_stats.update(wid, fn, 0.0, "-", "0X", "Unreadable video stream")
+            worker_stats.update(wid, fn, 0.0, "-", "0X", "Unreadable video stream", stage="Error", stage_detail="No video stream")
             return False
         if int(input_info.get("video_stream_count", 0) or 0) != 1:
             count = int(input_info.get("video_stream_count", 0) or 0)
             logging.error(f"Unsupported multi-video-stream input for {fn}: found {count} real video streams")
-            worker_stats.update(wid, fn, 0.0, "-", "0X", "Multi-video streams unsupported")
+            worker_stats.update(wid, fn, 0.0, "-", "0X", "Multi-video streams unsupported", stage="Error", stage_detail="Multi-video streams")
+            return False
+
+        bak = vpath.with_suffix(vpath.suffix + '.bak')
+        if bak.exists():
+            logging.error(f"Stale backup already exists for {fn}; rescue is required before reprocessing")
+            worker_stats.update(wid, fn, 0.0, "-", "0X", "Backup rescue required", stage="Error", stage_detail="Stale backup exists")
             return False
 
         if should_skip_video(vpath, config, info=input_info):
             logging.info(f"Skipping (Already Optimized): {vpath.name}")
-            worker_stats.update(wid, fn, 100.0, "SKIPPED", "0X", "Already Optimized")
-            return 2 # SKIPPED
+            worker_stats.update(wid, fn, 100.0, "SKIPPED", "0X", "Already Optimized", stage="Done", stage_detail="Already Optimized")
+            return ProcessResult.SKIPPED
 
         meta = get_file_metadata(vpath) if config.get('preserve_metadata', True) else None
         start_size = vpath.stat().st_size
@@ -3063,11 +3371,11 @@ def process_video(wid, vpath, codec, config):
         vaapi_device = None
         recent_output = []
         logging.info(f"[Worker {wid}] Using codec {codec} for {fn}")
-        if codec == "h264_vaapi":
+        if codec == VideoCodec.VAAPI:
             vaapi_device = find_vaapi_device()
             if not vaapi_device:
                 logging.warning(f"VAAPI requested but no render node found for {fn}, falling back to CPU")
-                worker_stats.update(wid, fn, 0.0, "-", "0X", "Retrying with CPU...")
+                worker_stats.update(wid, fn, 0.0, "-", "0X", "Retrying with CPU...", stage="Retrying", stage_detail="Fallback to CPU")
                 return process_video(wid, vpath, "libx264", config)
 
         cmd = [FFMPEG_CMD, "-nostdin", "-y"]
@@ -3085,9 +3393,9 @@ def process_video(wid, vpath, codec, config):
         if "nvenc" in codec:
             cmd.extend(["-rc:v:0", "vbr", "-cq:v:0", "24", "-preset:v:0", "p4"])
         elif "libx264" in codec:
+            threads = config.get("ffmpeg_threads") or max(1, (os.cpu_count() or 4) // max(1, config.get("max_workers", 2)))
             cmd.extend(["-b:v:0", config['video_bitrate'], "-preset:v:0", config.get("x264_preset", "medium")])
-            if config.get("ffmpeg_threads"):
-                cmd.extend(["-threads:v:0", str(config["ffmpeg_threads"])])
+            cmd.extend(["-threads:v:0", str(threads)])
         else:
             cmd.extend(["-b:v:0", config['video_bitrate']])
 
@@ -3101,11 +3409,18 @@ def process_video(wid, vpath, codec, config):
             "-progress", "-", "-nostats", str(tmp)
         ])
         
-        if IS_WINDOWS:
-            # CREATE_NEW_PROCESS_GROUP = 0x00000200
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', creationflags=0x00000200)
-        else:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
+        logging.debug(f"[Worker {wid}] Executing FFmpeg command: {' '.join(cmd)}")
+        
+        proc_kwargs = get_background_process_kwargs()
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            **proc_kwargs
+        )
         PROCESS_MGR.register(proc)
         try:
             while True:
@@ -3119,7 +3434,7 @@ def process_video(wid, vpath, codec, config):
                     try:
                         micros = float(line.split("out_time_ms=")[1].split()[0])
                         new_pct = min(99.9, ((micros / 1_000_000.0) / dur) * 100); pct = new_pct
-                        worker_stats.update(wid, fn, pct, s_fps, s_speed)
+                        worker_stats.update(wid, fn, pct, s_fps, s_speed, stage="Encoding", stage_detail=f"{pct:.1f}%")
                     except Exception as e:
                         logging.debug(f"Failed to parse FFmpeg progress for {fn}: {e}")
                 elif "out_time=" in line:
@@ -3127,19 +3442,19 @@ def process_video(wid, vpath, codec, config):
                         ts = line.split("out_time=")[1].split()[0]
                         h, m, s = map(float, ts.split(':'))
                         new_pct = min(99.9, ((h*3600 + m*60 + s) / dur) * 100); pct = new_pct
-                        worker_stats.update(wid, fn, pct, s_fps, s_speed)
+                        worker_stats.update(wid, fn, pct, s_fps, s_speed, stage="Encoding", stage_detail=f"{pct:.1f}%")
                     except Exception as e:
                         logging.debug(f"Failed to parse FFmpeg progress for {fn}: {e}")
                 elif "fps=" in line:
                     try:
                         s_fps = line.split("fps=")[1].split()[0]
-                        worker_stats.update(wid, fn, pct, s_fps, s_speed)
+                        worker_stats.update(wid, fn, pct, s_fps, s_speed, stage="Encoding", stage_detail=f"{pct:.1f}%")
                     except Exception as e:
                         logging.debug(f"Failed to parse FFmpeg FPS for {fn}: {e}")
                 elif "speed=" in line:
                     try:
                         s_speed = line.split("speed=")[1].split()[0]
-                        worker_stats.update(wid, fn, pct, s_fps, s_speed)
+                        worker_stats.update(wid, fn, pct, s_fps, s_speed, stage="Encoding", stage_detail=f"{pct:.1f}%")
                     except Exception as e:
                         logging.debug(f"Failed to parse FFmpeg speed for {fn}: {e}")
         finally:
@@ -3155,15 +3470,23 @@ def process_video(wid, vpath, codec, config):
                     f"Hardware encoding failed for {fn} with {codec} (exit {proc.returncode}). "
                     f"Recent FFmpeg output: {format_recent_output(recent_output)}"
                 )
-                worker_stats.update(wid, fn, 0.0, "-", "0X", "Retrying with CPU...")
+                worker_stats.update(wid, fn, 0.0, "-", "0X", "Retrying with CPU...", stage="Retrying", stage_detail="Fallback to CPU")
                 return process_video(wid, vpath, "libx264", config)
             logging.error(
                 f"Encoding failed for {fn} with {codec} (exit {proc.returncode}). "
                 f"Recent FFmpeg output: {format_recent_output(recent_output)}"
             )
+            worker_stats.update(wid, fn, 0.0, "-", "0X", "Encoding failed", stage="Error", stage_detail="FFmpeg exit non-zero")
             return False
 
-        verified, verification_details = verify_output(vpath, tmp, config, return_details=True)
+        worker_stats.update(wid, fn, 99.9, "-", "1.0X", stage="Verifying", stage_detail="Streams & Geometry")
+        verified, verification_details = verify_output(
+            vpath,
+            tmp,
+            config,
+            return_details=True,
+            progress_cb=lambda detail: worker_stats.update(wid, fn, 99.9, "-", "1.0X", stage="Verifying", stage_detail=detail)
+        )
         if not verified:
             logging.warning(f"Pre-swap verification failed for {fn} — discarding temp file")
             try: tmp.unlink()
@@ -3171,8 +3494,9 @@ def process_video(wid, vpath, codec, config):
                 logging.debug(f"Could not discard temp file for {fn}: {e}")
             if codec != "libx264":
                 logging.warning(f"Verification failed for hardware output on {fn}; retrying with CPU-safe yuv420p encode")
-                worker_stats.update(wid, fn, 0.0, "-", "0X", "Retrying with CPU...")
+                worker_stats.update(wid, fn, 0.0, "-", "0X", "Retrying with CPU...", stage="Retrying", stage_detail="Fallback to CPU")
                 return process_video(wid, vpath, "libx264", config)
+            worker_stats.update(wid, fn, 0.0, "-", "0X", "Verification failed", stage="Error", stage_detail="Verification Failed")
             return False
 
         end_size = tmp.stat().st_size
@@ -3189,103 +3513,118 @@ def process_video(wid, vpath, codec, config):
         bak = vpath.with_suffix(vpath.suffix + '.bak')
         if bak.exists():
             logging.error(f"Stale backup already exists for {fn}; rescue is required before reprocessing")
-            worker_stats.update(wid, fn, 0.0, "-", "0X", "Backup rescue required")
+            worker_stats.update(wid, fn, 0.0, "-", "0X", "Backup rescue required", stage="Error", stage_detail="Stale backup exists")
             try: tmp.unlink()
             except (subprocess.SubprocessError, OSError) as e:
                 logging.debug(f"Could not discard temp file for {fn}: {e}")
             clear_transaction_journal(vpath)
             return False
 
-        # Step 1: Back up the original
+        with _ACTIVE_SWAPS_LOCK:
+            _ACTIVE_SWAPS.add(str(vpath))
         try:
-            write_transaction_journal(
-                vpath,
-                stage="renaming_original_to_backup",
-                backup_path=str(bak),
-            )
-            vpath.rename(bak)
-            write_transaction_journal(
-                vpath,
-                stage="backup_created",
-                backup_path=str(bak),
-            )
-        except (OSError, AttributeError, ValueError, TypeError) as e:
-            logging.error(f"Could not rename original to .bak for {fn}: {e}")
-            try: tmp.unlink()
-            except OSError as e2:
-                logging.debug(f"Could not discard temp file for {fn}: {e2}")
-            clear_transaction_journal(vpath)
-            return False
-
-        # Step 2: Move temp file into place
-        try:
-            write_transaction_journal(vpath, stage="placing_verified_output", backup_path=str(bak))
-            tmp.rename(vpath)
-            write_transaction_journal(vpath, stage="swap_complete", backup_path=str(bak))
-        except (OSError, AttributeError, ValueError, TypeError) as e:
-            logging.error(f"Could not move temp file to {fn}: {e}")
-            write_transaction_journal(vpath, stage="swap_restore_attempt", backup_path=str(bak), last_error=str(e))
-            restored = False
             try:
-                bak.rename(vpath)  # Restore original
-                restored = True
-            except OSError as restore_error:
+                worker_stats.update(wid, fn, 100.0, "-", "-", size_stats, stage="Safety Swap", stage_detail="Creating .bak backup")
                 write_transaction_journal(
                     vpath,
-                    stage="swap_restore_failed",
+                    stage="renaming_original_to_backup",
                     backup_path=str(bak),
-                    last_error=str(restore_error),
                 )
-            try: tmp.unlink()
-            except OSError as e3:
-                logging.debug(f"Could not discard temp file during swap restore for {fn}: {e3}")
-            if restored:
-                clear_transaction_journal(vpath)
-            return False
-
-        # Step 3: Restore original timestamps (non-fatal if it fails)
-        if meta is not None:
-            try:
-                restore_file_metadata(vpath, meta)
-            except (subprocess.SubprocessError, OSError) as e:
-                logging.warning(f"Metadata restore failed for {fn} (file is intact): {e}")
-
-        # Step 4: Final size check, then delete backup
-        if vpath.exists() and vpath.stat().st_size > MIN_VALID_VIDEO_BYTES:
-            try:
-                bak.unlink()
-                clear_transaction_journal(vpath)
-            except (subprocess.SubprocessError, OSError) as e:
+                vpath.rename(bak)
                 write_transaction_journal(
                     vpath,
-                    stage="backup_cleanup_failed",
+                    stage="backup_created",
                     backup_path=str(bak),
-                    last_error=str(e),
                 )
-                logging.warning(f"Could not delete .bak for {fn}: {e} — will be cleaned next run")
-        else:
-            logging.error(f"Post-swap size check failed for {fn} — restoring backup")
-            write_transaction_journal(vpath, stage="post_swap_size_check_failed", backup_path=str(bak))
-            try:
-                vpath.unlink()
-                bak.rename(vpath)
+            except (OSError, AttributeError, ValueError, TypeError) as e:
+                logging.error(f"Could not rename original to .bak for {fn}: {e}")
+                try: tmp.unlink()
+                except OSError as e2:
+                    logging.debug(f"Could not discard temp file for {fn}: {e2}")
                 clear_transaction_journal(vpath)
-            except OSError as e2:
-                write_transaction_journal(
-                    vpath,
-                    stage="recovery_failed",
-                    backup_path=str(bak),
-                    last_error=str(e2),
-                )
-                logging.critical(f"RECOVERY FAILED for {fn}: {e2} — manual intervention required")
-            return False
-            
-        worker_stats.update(wid, fn, 100.0, "0", "0", size_stats)
-        return 1 # SUCCESS
-    except (OSError, AttributeError, ValueError, TypeError) as e:
-        logging.error(f"Process error for {fn}: {e}")
-        if 'tmp' in locals() and tmp.exists(): tmp.unlink()
-        return 0 # FAILED
+                worker_stats.update(wid, fn, 0.0, "-", "0X", "Swap backup failed", stage="Error", stage_detail="Backup rename failed")
+                return False
+
+            try:
+                worker_stats.update(wid, fn, 100.0, "-", "-", size_stats, stage="Safety Swap", stage_detail="Moving output into place")
+                write_transaction_journal(vpath, stage="placing_verified_output", backup_path=str(bak))
+                tmp.rename(vpath)
+                write_transaction_journal(vpath, stage="swap_complete", backup_path=str(bak))
+            except (OSError, AttributeError, ValueError, TypeError) as e:
+                logging.error(f"Could not move temp file to {fn}: {e}")
+                write_transaction_journal(vpath, stage="swap_restore_attempt", backup_path=str(bak), last_error=str(e))
+                restored = False
+                try:
+                    bak.rename(vpath)
+                    restored = True
+                except OSError as restore_error:
+                    write_transaction_journal(
+                        vpath,
+                        stage="swap_restore_failed",
+                        backup_path=str(bak),
+                        last_error=str(restore_error),
+                    )
+                try: tmp.unlink()
+                except OSError as e3:
+                    logging.debug(f"Could not discard temp file during swap restore for {fn}: {e3}")
+                if restored:
+                    clear_transaction_journal(vpath)
+                worker_stats.update(wid, fn, 0.0, "-", "0X", "Swap placement failed", stage="Error", stage_detail="Move output failed")
+                return False
+
+            if meta is not None:
+                try:
+                    worker_stats.update(wid, fn, 100.0, "-", "-", size_stats, stage="Safety Swap", stage_detail="Restoring timestamps")
+                    restore_file_metadata(vpath, meta)
+                except (subprocess.SubprocessError, OSError) as e:
+                    logging.warning(f"Metadata restore failed for {fn} (file is intact): {e}")
+
+            worker_stats.update(wid, fn, 100.0, "-", "-", size_stats, stage="Safety Swap", stage_detail="Verifying final file size")
+            if vpath.exists() and vpath.stat().st_size > MIN_VALID_VIDEO_BYTES:
+                try:
+                    bak.unlink()
+                    clear_transaction_journal(vpath)
+                except (subprocess.SubprocessError, OSError) as e:
+                    write_transaction_journal(
+                        vpath,
+                        stage="backup_cleanup_failed",
+                        backup_path=str(bak),
+                        last_error=str(e),
+                    )
+                    logging.warning(f"Could not delete .bak for {fn}: {e} — will be cleaned next run")
+            else:
+                logging.error(f"Post-swap size check failed for {fn} — restoring backup")
+                write_transaction_journal(vpath, stage="post_swap_size_check_failed", backup_path=str(bak))
+                try:
+                    vpath.unlink()
+                    bak.rename(vpath)
+                    clear_transaction_journal(vpath)
+                except OSError as e2:
+                    write_transaction_journal(
+                        vpath,
+                        stage="recovery_failed",
+                        backup_path=str(bak),
+                        last_error=str(e2),
+                    )
+                    logging.critical(f"RECOVERY FAILED for {fn}: {e2} — manual intervention required")
+                worker_stats.update(wid, fn, 0.0, "-", "0X", "Post-swap check failed", stage="Error", stage_detail="Size verification failed")
+                return False
+        finally:
+            with _ACTIVE_SWAPS_LOCK:
+                _ACTIVE_SWAPS.discard(str(vpath))
+
+        worker_stats.record_completed(wid, time.time() - t_start)
+        worker_stats.update(wid, fn, 100.0, "0", "0", size_stats, stage="Done", stage_detail="Completed")
+        return ProcessResult.SUCCESS
+    except Exception as e:
+        logging.error(f"Process error for {fn}: {e}\n{traceback.format_exc()}")
+        if 'tmp' in locals() and tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        worker_stats.update(wid, fn, 0.0, "-", "0X", "Exception", stage="Error", stage_detail=str(e))
+        return ProcessResult.FAILED
 
 def normalize_worker_count(value):
     max_cap = max(1, os.cpu_count() or 1)
@@ -3320,7 +3659,21 @@ def update_display(total, completed, codec_name, config):
     dashboard_width = max(44, min(70, cols - 5))
     box = draw_header(config, codec_name, width=dashboard_width)
     header_lines = len(box.splitlines())
-    max_display_workers = max(1, min(6, (rows - header_lines - 3) // 3))
+    available_worker_lines = rows - header_lines - 4
+    if available_worker_lines < 2:
+        compact_parts = [f"[Progress] {completed}/{total} done ({o_pct:.1f}%)", f"active {len(in_progress)}"]
+        for wid in in_progress[:2]:
+            s = stats[wid]
+            compact_parts.append(
+                f"W{wid} {ellipsize_text(s['fn'], 18)} {s['pct']:.1f}% {s['speed']}"
+            )
+        if len(in_progress) > 2:
+            compact_parts.append(f"+{len(in_progress) - 2} more")
+        snapshot = ellipsize_text(" | ".join(compact_parts), max(24, cols - 1))
+        emit_compact_dashboard(snapshot, completed, total)
+        return
+
+    max_display_workers = max(1, min(6, available_worker_lines // 3))
     display_workers = in_progress[:max_display_workers]
     label_width = max(12, min(22, dashboard_width - 34))
     bar_width = max(10, min(30, dashboard_width - label_width - 14))
@@ -3331,11 +3684,10 @@ def update_display(total, completed, codec_name, config):
         s = stats[wid]
         fn_short = ellipsize_text(s['fn'], label_width)
         eta_str = ""
-        if 0 < s['pct'] < 100 and 'start' in s:
-            elapsed = time.time() - s['start']
-            if s['pct'] > 1:
-                rem = (elapsed / (s['pct'] / 100)) - elapsed
-                m, s_v = divmod(int(rem), 60); eta_str = f"ETA: {m}m {s_v}s"
+        if 0 < s.get('pct', 0) < 100:
+            eta_val = s.get('eta_seconds')
+            if eta_val is not None:
+                eta_str = format_eta(eta_val)
         buffer.append(
             render_progress(
                 fn_short,
@@ -3344,6 +3696,8 @@ def update_display(total, completed, codec_name, config):
                 s['speed'],
                 s['size'],
                 eta_str,
+                stage=s.get('stage', 'Encoding'),
+                stage_detail=s.get('stage_detail', ''),
                 label_width=label_width,
                 bar_width=bar_width,
                 detail_width=detail_width,
@@ -3359,19 +3713,21 @@ def update_display(total, completed, codec_name, config):
         buffer.append(f" {C.MUTED}{more_text}{C.RESET}\n")
 
     buffer.append(f" {C.WHITE}{'=' * min(dashboard_width + 2, max(24, cols - 2))}{C.RESET}")
+    total_eta_str = worker_stats.get_queue_eta_formatted(total, completed)
+    queue_eta_part = f" | Total ETA: {total_eta_str}" if total_eta_str and total_eta_str != "0s" else ""
     summary_text = ellipsize_text(
-        f"Total: {total} | Done: {completed} | Active: {len(in_progress)} | {o_pct:.1f}%",
+        f"Total: {total} | Done: {completed} | Active: {len(in_progress)}{queue_eta_part} | {o_pct:.1f}%",
         dashboard_width + 2,
     )
     buffer.append(f" {C.WHITE}{summary_text}{C.RESET}")
-    render_live_dashboard(box + "\n".join(buffer))
+    render_live_dashboard(box + "\n" + "\n".join(buffer))
 
 def show_security_notice(log_msg, drive_type=None):
     clear_screen(); w = 70
     draw_separator(w, 'top')
     draw_box_line("SECURITY & TRANSPARENCY", w, C.BOLD + C.PRIMARY)
     draw_separator(w, 'mid')
-    if drive_type == 2: # REMOVABLE
+    if drive_type == DriveType.REMOVABLE:
         draw_box_line(f"{get_warning_symbol()}  REMOVABLE MEDIA DETECTED", w, C.BOLD + C.WARNING)
         draw_box_line("IMPORTANT: Keep the device connected to prevent data loss.", w, C.WARNING)
         draw_separator(w, 'mid')
@@ -3421,16 +3777,17 @@ def prompt_menu_choice(prompt, default_choice, valid_choices):
         print(f" {C.ERROR}[!] Invalid choice.{C.RESET}")
 
 def configure_worker_mode(config):
-    current_default = "1" if int(config.get("max_workers", 1) or 1) == 1 else ("2" if int(config.get("max_workers", 1) or 1) == DEFAULT_CONFIG["max_workers"] else "3")
-    print(f"    [1] Sequential")
-    print(f"    [2] Parallel")
+    default_workers = get_safe_default_workers(config.get("codec", "auto"))
+    current_default = "1" if int(config.get("max_workers", 1) or 1) == 1 else ("2" if int(config.get("max_workers", 1) or 1) == default_workers else "3")
+    print(f"    [1] Eco Mode (1 worker, low power)")
+    print(f"    [2] Balanced Mode (Safe {default_workers} workers, stable)")
     print(f"    [3] Custom Workers")
     mode_choice = prompt_menu_choice("Worker Mode", current_default, {"1", "2", "3"})
     if mode_choice == "1":
         config["max_workers"] = 1
         return
     if mode_choice == "2":
-        config["max_workers"] = DEFAULT_CONFIG["max_workers"]
+        config["max_workers"] = default_workers
         return
     while True:
         worker_value = safe_input(
@@ -3621,13 +3978,13 @@ def scan_videos_for_context(context, worker_override=False):
                     continue
                 seen_videos.add(key)
                 videos.append(video)
-        if config["sort"] == "name_az":
+        if config["sort"] == SortOrder.NAME_AZ:
             videos.sort()
-        elif config["sort"] == "name_za":
+        elif config["sort"] == SortOrder.NAME_ZA:
             videos.sort(reverse=True)
-        elif config["sort"] == "size_desc":
+        elif config["sort"] == SortOrder.SIZE_DESC:
             videos.sort(key=lambda x: x.stat().st_size, reverse=True)
-        elif config["sort"] == "size_asc":
+        elif config["sort"] == SortOrder.SIZE_ASC:
             videos.sort(key=lambda x: x.stat().st_size)
     total_in = 0
     skipped_pre = 0
@@ -3640,6 +3997,30 @@ def scan_videos_for_context(context, worker_override=False):
     if context.removable_targets and not worker_override:
         config["max_workers"] = 1
     return videos, total_in, skipped_pre
+
+def probe_subfolder_videos(context):
+    """Check if subfolders contain video files when current folder scan finds none."""
+    if context.is_explicit_file_mode or context.session_config.get("recursive", False):
+        return []
+    subfolder_videos = []
+    seen = set()
+    for target_dir in context.target_dirs or [Path.cwd()]:
+        try:
+            target_resolved = target_dir.resolve()
+        except OSError:
+            target_resolved = target_dir
+        for video in iter_video_files(target_dir, recursive=True):
+            key = workspace_key(video)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                if video.parent.resolve() != target_resolved:
+                    subfolder_videos.append(video)
+            except OSError:
+                if video.parent != target_dir:
+                    subfolder_videos.append(video)
+    return subfolder_videos
 
 def render_run_summary(context, videos, total_in, skipped_pre):
     clear_screen()
@@ -3677,11 +4058,38 @@ def update_runtime_state(context):
     RUNTIME_STATE["auto_cleanup"] = bool(context.session_config.get("auto_cleanup", True))
     RUNTIME_STATE["target_dirs"] = context.target_dirs or [Path.cwd()]
 
+_INTERRUPT_LOCK = threading.Lock()
+_INTERRUPT_HANDLED = False
+_ACTIVE_SWAPS = set()
+_ACTIVE_SWAPS_LOCK = threading.Lock()
+_SHUTDOWN_REQUESTED = threading.Event()
+
+def reset_interrupt_state():
+    global _INTERRUPT_HANDLED
+    with _INTERRUPT_LOCK:
+        _INTERRUPT_HANDLED = False
+    _SHUTDOWN_REQUESTED.clear()
+
 def handle_interrupt(sig=None, frame=None):
+    global _INTERRUPT_HANDLED
+    with _INTERRUPT_LOCK:
+        if _INTERRUPT_HANDLED:
+            return
+        _INTERRUPT_HANDLED = True
+
+    _SHUTDOWN_REQUESTED.set()
     logging.info("Interrupt received. Emergency shutdown...")
     PROCESS_MGR.kill_all()
     show_cursor()
     print(f"\n{C.WARNING}!!! MISSION ABORTED: SAFE EXIT INITIATED !!!{C.RESET}")
+
+    # Allow in-flight atomic file swaps up to 2 seconds to complete
+    for _ in range(20):
+        with _ACTIVE_SWAPS_LOCK:
+            if not _ACTIVE_SWAPS:
+                break
+        time.sleep(0.1)
+
     recursive = bool(RUNTIME_STATE.get("recursive", False))
     target_dirs = RUNTIME_STATE.get("target_dirs") or [Path.cwd()]
     if RUNTIME_STATE.get("auto_cleanup", True):
@@ -3692,7 +4100,7 @@ def handle_interrupt(sig=None, frame=None):
     if baks:
         print(f"{C.WARNING}[!] {len(baks)} backup file(s) remain — run Mnemosyne again to restore them safely.{C.RESET}")
     print(f"{C.INFO}Clean-up complete. You may now exit.{C.RESET}")
-    os._exit(130)  # Hard exit — ensures all threads stop immediately
+    os._exit(ExitCode.INTERRUPTED)  # Hard exit — ensures all threads stop immediately
 
 def register_signal_handlers():
     import signal
@@ -3705,26 +4113,31 @@ def register_signal_handlers():
         except (OSError, RuntimeError, ValueError):
             pass
 
+def build_argument_parser():
+    parser = argparse.ArgumentParser(description=f"{APP_NAME} v{VERSION}", formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('paths', nargs='*', help='Video files to process, or folders to scan')
+    parser.add_argument('-r', '--recursive', action='store_true', help='Search subfolders')
+    parser.add_argument('-w', '--workers', type=int, help='Parallel threads')
+    parser.add_argument('--height', type=int, help='Target height')
+    parser.add_argument('-d', '--debug', action='store_true', help='Enable detailed verbose debug logging')
+    parser.add_argument('--desktop-log', action='store_true', help='Log to Desktop')
+    parser.add_argument('--codec', choices=['auto', 'h264_nvenc', 'h264_amf', 'h264_qsv', 'h264_videotoolbox', 'h264_vaapi', 'libx264'], default='auto')
+    return parser
+
 def main():
     ensure_utf8_stdio()
     enable_ansi()
     interactive_mode = supports_interactive_input()
     register_signal_handlers()
 
-    parser = argparse.ArgumentParser(description=f"{APP_NAME} v{VERSION}", formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('paths', nargs='*', help='Video files to process, or folders to scan')
-    parser.add_argument('-r', '--recursive', action='store_true', help='Search subfolders')
-    parser.add_argument('-w', '--workers', type=int, help='Parallel threads')
-    parser.add_argument('--height', type=int, help='Target height')
-    parser.add_argument('--desktop-log', action='store_true', help='Log to Desktop')
-    parser.add_argument('--codec', choices=['auto', 'h264_nvenc', 'h264_amf', 'h264_qsv', 'h264_videotoolbox', 'h264_vaapi', 'libx264'], default='auto')
+    parser = build_argument_parser()
     args = parser.parse_args()
 
     context = build_run_context(args, parser)
     ffmpeg_state = load_ffmpeg_state()
     update_runtime_state(context)
 
-    log_file = setup_logging(desktop_mode=context.session_config.get('desktop_log', False))
+    log_file = setup_logging(debug=args.debug, desktop_mode=context.session_config.get('desktop_log', False))
     log_msg = str(log_file)
     show_security_notice(
         log_msg,
@@ -3734,7 +4147,7 @@ def main():
 
     worker_override = args.workers is not None
     while True:
-        log_file = setup_logging(desktop_mode=context.session_config.get("desktop_log", False))
+        log_file = setup_logging(debug=args.debug, desktop_mode=context.session_config.get("desktop_log", False))
         videos, total_in, skipped_pre = scan_videos_for_context(context, worker_override=worker_override)
         update_runtime_state(context)
 
@@ -3754,24 +4167,51 @@ def main():
                 print(f" {C.WARNING}Ignored {len(context.invalid_inputs)} unsupported or missing input(s).{C.RESET}")
             if context.is_explicit_file_mode:
                 print(f" {C.WARNING}No supported dropped video files were found.{C.RESET}")
-                return 1
-            if interactive_mode:
-                if safe_input(f" {C.WARNING}No videos found. Press ENTER to retry...{C.RESET}", "q") == "q":
-                    return 1
-                continue
-            print(f" {C.WARNING}No videos found in non-interactive mode. Exiting cleanly.{C.RESET}")
-            return 1
+                return ExitCode.ERROR
+            if not interactive_mode:
+                print(f" {C.WARNING}No videos found in non-interactive mode. Exiting cleanly.{C.RESET}")
+                return ExitCode.ERROR
+
+            sub_videos = probe_subfolder_videos(context)
+            if sub_videos:
+                print(f" {C.INFO}[i] Found {len(sub_videos)} video(s) inside subfolders.{C.RESET}")
+                print(f"     Current scope is set to 'Current Folder' (non-recursive).\n")
+                choice = safe_input(
+                    f" {C.SUCCESS}Enable recursive subfolder scan?{C.RESET} [Y] Yes | [E] Edit Settings | [Q] Quit: ",
+                    "y",
+                ).lower().strip()
+                if choice in {"y", "yes", ""}:
+                    context.session_config["recursive"] = True
+                    continue
+                elif choice in {"e", "edit"}:
+                    edit_session_settings(context, ffmpeg_state)
+                    continue
+                else:
+                    return ExitCode.SUCCESS
+            else:
+                print(f" {C.WARNING}No video files found in the specified location.{C.RESET}\n")
+                choice = safe_input(
+                    f" [E] Edit Settings | [R] Retry | [Q] Quit: ",
+                    "e",
+                ).lower().strip()
+                if choice in {"e", "edit", ""}:
+                    edit_session_settings(context, ffmpeg_state)
+                    continue
+                elif choice in {"r", "retry"}:
+                    continue
+                else:
+                    return ExitCode.SUCCESS
 
         render_run_summary(context, videos, total_in, skipped_pre)
         process_space_needed = max(PROCESS_SPACE_MIN_BYTES, int(total_in * PROCESS_SPACE_MULTIPLIER))
         space_targets = list(iter_unique_target_dirs(target_dirs=[video.parent for video in videos]))
         low_space = [target for target in space_targets if not warn_if_space_is_low(target, process_space_needed, "video processing")]
         if low_space and not interactive_mode:
-            return 1
+            return ExitCode.ERROR
         if low_space:
             answer = safe_input(f" {C.WARNING}Low free space detected. Continue anyway? (Y/N): {C.RESET}", "n").strip().lower()
             if answer not in {"y", "yes"}:
-                return 1
+                return ExitCode.ERROR
         if not interactive_mode:
             logging.info("Non-interactive stdin detected; starting immediately with the current configuration.")
             break
@@ -3825,7 +4265,10 @@ def main():
     start_t = time.time(); success = 0; failed = 0; skipped = 0
     clear_screen(); hide_cursor()
     try:
-        with ThreadPoolExecutor(max_workers=context.session_config['max_workers']) as executor:
+        with ThreadPoolExecutor(
+            max_workers=context.session_config['max_workers'],
+            thread_name_prefix="MnemoWorker"
+        ) as executor:
             futures = {
                 executor.submit(
                     process_video,
@@ -3842,10 +4285,14 @@ def main():
                 time.sleep(0.5)
             update_display(len(videos), len(videos), codec_name, context.session_config)
             for f in futures:
-                res = f.result()
-                if res == 1: success += 1
-                elif res == 2: skipped += 1
-                else: failed += 1
+                try:
+                    res = f.result()
+                    if res == ProcessResult.SUCCESS: success += 1
+                    elif res == ProcessResult.SKIPPED: skipped += 1
+                    else: failed += 1
+                except Exception as exc:
+                    logging.error(f"Worker execution failed for {futures.get(f)}: {exc}")
+                    failed += 1
     finally:
         show_cursor()
 
@@ -3868,7 +4315,7 @@ def main():
         print(f"\n {C.WARNING}Mission completed with failures. Review the log before running on originals again.{C.RESET}")
     else:
         print(f"\n {C.SUCCESS}All operations completed successfully.{C.RESET}")
-    return 0 if failed == 0 else 2
+    return ExitCode.SUCCESS if failed == 0 else 2
 
 if __name__ == "__main__":
     try: sys.exit(main())

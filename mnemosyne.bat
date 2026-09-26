@@ -11,7 +11,7 @@ REM Windows launcher only. Requires mnemosyne.py in the same folder.
 REM Python code is intentionally not embedded to reduce antivirus false positives.
 REM ============================================================================
 setlocal enabledelayedexpansion
-title Mnemosyne v2.0
+title Mnemosyne v2.1
 
 chcp 65001 >nul
 set "PYTHONNOUSERSITE=1"
