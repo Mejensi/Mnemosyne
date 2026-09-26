@@ -50,3 +50,5 @@ bin/
 Lib/
 Scripts/
 .pytest_cache/
+.coverage
+htmlcov/
