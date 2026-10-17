@@ -15,7 +15,7 @@ Mnemosyne is a powerful, automated video compression engine built for simplicity
 - **Deep Verification** — Before the original is replaced, the output is checked against the input for codec, resolution, aspect ratio, duration, FPS, frame count, audio streams, subtitles, chapters, and pixel format. Files that fail verification are discarded and optionally retried with CPU encoding.
 - **Timeline Preservation** — Original file access time, modification time, and creation time (Windows) are restored to the new file after conversion. Your folder stays sorted exactly as before.
 - **Full Stream Preservation** — All audio tracks, subtitle streams, data streams, attachment streams, and chapters are copied without re-encoding unless overridden.
-- **Managed FFmpeg** — Mnemosyne can download, verify, and manage its own FFmpeg binaries. Supports appdata, portable, session-scoped, and custom install locations. GPG signature verification is enforced on macOS (Evermeet source). Stale installs are detected and can be cleaned up automatically.
+- **Managed FFmpeg** — Mnemosyne can download, verify, and manage its own FFmpeg binaries. Supports appdata, portable, runtime-folder (next to the launcher), and custom install locations. GPG signature verification is enforced on macOS (Evermeet source). If verification fails you can accept an unverified copy for one run only; it is removed the next time Mnemosyne starts. Stale installs are detected and can be cleaned up automatically.
 - **Live Dashboard** — A real-time terminal dashboard shows per-worker progress, FPS, encoding speed, ETA, and file size deltas. Falls back to compact single-line output on narrow terminals or non-TTY environments.
 - **Multi-threaded Processing** — Configurable worker count (sequential, parallel, or custom). Automatically limits to 1 worker when removable media is detected.
 - **Drag-and-Drop Mode** — Drop video files directly onto the launcher script to process specific files without a folder scan.
@@ -43,7 +43,7 @@ Run **`mnemosyne.bat`** (requires `mnemosyne.py` in the same folder). The launch
 bash mnemosyne.sh
 ```
 
-Requires `mnemosyne.py` in the same folder. Ensure Python 3 is installed. On macOS, GPG is required for automatic FFmpeg download (signature verification). Install via Homebrew: `brew install gnupg`.
+Requires `mnemosyne.py` in the same folder. Ensure Python 3.8 or newer is installed. On macOS, GPG is required for automatic FFmpeg download (signature verification). Install via Homebrew: `brew install gnupg`.
 
 ### Direct Python
 
@@ -57,11 +57,12 @@ python mnemosyne.py [options] [files...]
 
 | Option | Description |
 |---|---|
-| `paths` | Specific video files to process (drag-and-drop mode) |
+| `paths` | Video files to process (drag-and-drop mode), or folders to scan |
 | `-r`, `--recursive` | Scan subfolders |
 | `-w N`, `--workers N` | Number of parallel encoding threads |
 | `--height N` | Target output height in pixels (default: 480) |
 | `--desktop-log` | Write log file to Desktop instead of temp folder |
+| `-d`, `--debug` | Write detailed debug information to the log |
 | `--codec` | Force a specific encoder: `auto`, `h264_nvenc`, `h264_amf`, `h264_qsv`, `h264_videotoolbox`, `h264_vaapi`, `libx264` |
 
 ---
@@ -110,7 +111,7 @@ Saved settings include resolution, bitrate, FPS, worker count, recursive mode, s
 
 ## Supported Formats
 
-`.mp4` `.mkv` `.avi` `.mov` `.flv` `.wmv` `.webm` `.ts` `.m4v`
+`.mp4` `.mkv` `.avi` `.mov` `.flv` `.wmv` `.ts` `.m4v`
 
 ---
 
