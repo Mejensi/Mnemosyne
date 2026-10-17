@@ -4,6 +4,35 @@ All notable changes to the Mnemosyne project.
 
 ---
 
+## [2.2] — 2026-10-17
+
+### Data Integrity & Verification
+
+- **Mandatory full output decode verification**: Enforced full `verify_media_decode` execution with `-xerror` across all outputs. Container header frame counts no longer skip full decode checking, preventing truncated or corrupted outputs from replacing originals.
+- **Atomic per-binary upgrades**: Replaced whole-directory replacement with safe per-binary staging, backups, and automatic rollback to protect user files in custom directories.
+- **Portrait smartphone video handling**: Added rotation metadata parsing (`parse_rotation`, `is_quarter_turn`, `get_display_height`) to prevent geometry validation failures on 90° and 270° rotated videos.
+- **Smart re-encode skip tolerances**: Introduced `SKIP_BITRATE_TOLERANCE` (1.10), `CONTAINER_OVERHEAD_TOLERANCE` (1.15), and a +0.5 FPS margin to prevent infinite re-encoding on streamless containers (MKV, WMV, TS).
+- **Short audio duration padding**: Added 100 ms `DURATION_GRACE_SEC` to accommodate standard AAC encoder priming/padding on clips shorter than 1 second.
+- **Format pruning**: Removed `.webm` from supported format lists due to container incompatibility with H.264 + AAC.
+
+### Platform & Launchers
+
+- **Windows filename escaping**: Disabled delayed expansion during Python invocation in `mnemosyne.bat` to preserve exclamation marks (`!`) in file names and paths.
+- **Winget installer pinning**: Pinned winget auto-install package ID to `Python.Python.3.13`.
+- **PowerShell security**: Removed `-ExecutionPolicy Bypass` from Windows PowerShell fallback download routines.
+- **Creation timestamp preservation**: Added `st_birthtime` support on Windows (Python 3.12+) with `st_ctime` fallback.
+- **Ephemeral unverified cleanup**: Ensured temporary unverified FFmpeg installations accepted for a single run are automatically removed on subsequent runs.
+- **Launcher titles**: Synced `v2.2` window title escape sequences across `mnemosyne.bat` and `mnemosyne.sh`.
+
+### Test Suite & CI
+
+- **Host environment isolation**: Implemented pytest session and test fixtures in `conftest.py` redirecting settings, logs, and state files to temporary directories.
+- **Offline test execution**: Added offline GPG fixtures and decoupled worker allocation tests from physical host core counts.
+- **Pruned obsolete tests**: Removed dead tests and mock helpers targeting legacy wrappers and non-existent directories.
+- **GitHub Actions CI**: Added automated system FFmpeg installation and expanded test matrix to include Python 3.13.
+
+---
+
 ## [2.1] — 2026-09-26
 
 ### Security & Hardening
