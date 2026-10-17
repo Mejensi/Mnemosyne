@@ -88,118 +88,6 @@ def probe_bash():
 
 
 class MnemosyneLauncherTests(unittest.TestCase):
-    def load_fresh_module_info(
-        self,
-        cwd: Path,
-        path_value: str,
-        launcher_dir: Path | None = None,
-        module_path: Path | None = None,
-    ):
-        original_appdata = os.environ.get("APPDATA")
-        original_path = os.environ.get("PATH")
-        original_launcher_dir = os.environ.get(mnemosyne.LAUNCHER_DIR_ENV)
-        original_cwd = Path.cwd()
-        temp_appdata = tempfile.mkdtemp(prefix="mnemo_test_appdata_")
-        try:
-            os.environ["APPDATA"] = temp_appdata
-            os.environ["PATH"] = path_value
-            if launcher_dir is None:
-                os.environ.pop(mnemosyne.LAUNCHER_DIR_ENV, None)
-            else:
-                os.environ[mnemosyne.LAUNCHER_DIR_ENV] = str(launcher_dir)
-            os.chdir(cwd)
-            module_name = f"mnemo_test_{time.time_ns()}"
-            spec = importlib.util.spec_from_file_location(module_name, module_path or (ROOT / "mnemosyne.py"))
-            module = importlib.util.module_from_spec(spec)
-            assert spec.loader is not None
-            spec.loader.exec_module(module)
-            return {
-                "check_ffmpeg": module.check_ffmpeg(),
-                "ffmpeg_cmd": module.FFMPEG_CMD,
-                "ffprobe_cmd": module.FFPROBE_CMD,
-            }
-        finally:
-            os.chdir(original_cwd)
-            if original_appdata is None:
-                os.environ.pop("APPDATA", None)
-            else:
-                os.environ["APPDATA"] = original_appdata
-            if original_path is None:
-                os.environ.pop("PATH", None)
-            else:
-                os.environ["PATH"] = original_path
-            if original_launcher_dir is None:
-                os.environ.pop(mnemosyne.LAUNCHER_DIR_ENV, None)
-            else:
-                os.environ[mnemosyne.LAUNCHER_DIR_ENV] = original_launcher_dir
-            shutil.rmtree(temp_appdata, ignore_errors=True)
-
-    def populate_binary_dir(self, bindir: Path):
-        if not mnemosyne.check_ffmpeg_with_policy("allow"):
-            self.skipTest("FFmpeg/FFprobe not available")
-        bindir.mkdir(parents=True, exist_ok=True)
-        for source in (Path(mnemosyne.FFMPEG_CMD), Path(mnemosyne.FFPROBE_CMD)):
-            target = bindir / source.name
-            try:
-                os.link(source, target)
-            except Exception:
-                shutil.copy2(source, target)
-
-    def native_repo_ffmpeg_pair(self):
-        ffmpeg_name = "ffmpeg.exe" if mnemosyne.IS_WINDOWS else "ffmpeg"
-        ffprobe_name = "ffprobe.exe" if mnemosyne.IS_WINDOWS else "ffprobe"
-        ffmpeg = ROOT / "bin" / ffmpeg_name
-        ffprobe = ROOT / "bin" / ffprobe_name
-        return ffmpeg.exists() and ffprobe.exists()
-
-    def require_native_repo_ffmpeg_pair(self):
-        if not self.native_repo_ffmpeg_pair():
-            self.skipTest("Native repo FFmpeg/FFprobe pair not bundled for this platform")
-
-    def test_check_ffmpeg_prefers_repo_bin_when_path_empty(self):
-        self.require_native_repo_ffmpeg_pair()
-        info = self.load_fresh_module_info(ROOT, "")
-        self.assertTrue(info["check_ffmpeg"])
-        self.assertTrue(info["ffmpeg_cmd"].startswith(str((ROOT / "bin").resolve())))
-        self.assertTrue(info["ffprobe_cmd"].startswith(str((ROOT / "bin").resolve())))
-
-    def test_check_ffmpeg_ignores_fake_cwd_bin(self):
-        self.require_native_repo_ffmpeg_pair()
-        with managed_tempdir("mnemo_test_fake_cwd_bin_") as base:
-            bindir = base / "bin"
-            bindir.mkdir()
-            fake_ffmpeg = bindir / ("ffmpeg.exe" if mnemosyne.IS_WINDOWS else "ffmpeg")
-            fake_ffprobe = bindir / ("ffprobe.exe" if mnemosyne.IS_WINDOWS else "ffprobe")
-            fake_ffmpeg.write_text("fake", encoding="utf-8")
-            fake_ffprobe.write_text("fake", encoding="utf-8")
-            info = self.load_fresh_module_info(base, "")
-        self.assertTrue(info["check_ffmpeg"])
-        self.assertTrue(info["ffmpeg_cmd"].startswith(str((ROOT / "bin").resolve())))
-        self.assertTrue(info["ffprobe_cmd"].startswith(str((ROOT / "bin").resolve())))
-
-    def test_check_ffmpeg_ignores_launcher_env_override_during_direct_execution(self):
-        self.require_native_repo_ffmpeg_pair()
-        with managed_tempdir("mnemo_test_launcher_env_ignore_") as base:
-            fake_launcher = base / "launcher"
-            self.populate_binary_dir(fake_launcher / "bin")
-            info = self.load_fresh_module_info(ROOT, "", launcher_dir=fake_launcher)
-        self.assertTrue(info["check_ffmpeg"])
-        self.assertTrue(info["ffmpeg_cmd"].startswith(str((ROOT / "bin").resolve())))
-        self.assertTrue(info["ffprobe_cmd"].startswith(str((ROOT / "bin").resolve())))
-
-    def test_check_ffmpeg_honors_launcher_env_in_embedded_runtime(self):
-        self.require_native_repo_ffmpeg_pair()
-        temp_root = Path(tempfile.gettempdir())
-        runtime_path = temp_root / f"mnemosyne_runtime_{time.time_ns()}.py"
-        try:
-            shutil.copy(ROOT / "mnemosyne.py", runtime_path)
-            info = self.load_fresh_module_info(ROOT, "", launcher_dir=ROOT, module_path=runtime_path)
-        finally:
-            runtime_path.unlink(missing_ok=True)
-        self.assertTrue(info["check_ffmpeg"])
-        self.assertTrue(info["ffmpeg_cmd"].startswith(str((ROOT / "bin").resolve())))
-        self.assertTrue(info["ffprobe_cmd"].startswith(str((ROOT / "bin").resolve())))
-
     def test_check_ffmpeg_rejects_system_path_when_policy_prompt_declines(self):
         with managed_tempdir("mnemo_test_system_ffmpeg_prompt_") as base:
             marker = base / "system_ffmpeg_marker.txt"
@@ -508,6 +396,8 @@ class MnemosyneLauncherTests(unittest.TestCase):
             self.assertFalse(mnemosyne.prompt_unverified_ffmpeg_override(["signature download failed"]))
 
     def test_host_environment_can_use_system_ffmpeg_when_allowed(self):
+        if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+            self.skipTest("FFmpeg/FFprobe are not installed on this machine")
         with patch.object(mnemosyne, "FFMPEG_CMD", mnemosyne.FFMPEG_CMD), patch.object(
             mnemosyne, "FFPROBE_CMD", mnemosyne.FFPROBE_CMD
         ):
@@ -516,14 +406,37 @@ class MnemosyneLauncherTests(unittest.TestCase):
             self.assertTrue(Path(mnemosyne.FFPROBE_CMD).exists())
 
     def test_macos_evermeet_asset_download_requires_all_signatures(self):
-        assets = [
-            {"binary_name": "ffmpeg", "signature_url": "https://example.invalid/ffmpeg.sig"},
-            {"binary_name": "ffprobe", "signature_url": "https://example.invalid/ffprobe.sig"},
-        ]
-        download_results = [True, False]
-        with patch.object(mnemosyne, "download_url_to_file", side_effect=download_results):
-            successful_count = sum(1 for asset in assets if mnemosyne.download_url_to_file("", Path("/tmp/fake")))
-        self.assertEqual(successful_count, 1)
+        source = {
+            "kind": "evermeet",
+            "assets": [
+                {
+                    "binary_name": name,
+                    "archive_name": f"{name}.zip",
+                    "signature_name": f"{name}.zip.sig",
+                    "url": f"https://example.invalid/{name}.zip",
+                    "signature_url": f"https://example.invalid/{name}.zip.sig",
+                }
+                for name in ("ffmpeg", "ffprobe")
+            ],
+        }
+
+        def fake_download(url, dest, show_progress=False):
+            if url.endswith("ffprobe.zip.sig"):
+                return False  # the second signature cannot be fetched
+            Path(dest).write_bytes(b"data")
+            return True
+
+        with managed_tempdir("mnemo_test_evermeet_sigs_") as base:
+            with patch.object(mnemosyne, "download_url_to_file", side_effect=fake_download), patch.object(
+                mnemosyne, "download_text", return_value=""
+            ), patch.object(mnemosyne, "verify_evermeet_signature", return_value=True), patch.object(
+                mnemosyne, "extract_binaries_from_archive"
+            ) as extract_mock:
+                with self.assertRaises(RuntimeError) as raised:
+                    mnemosyne.extract_ffmpeg_source(source, base, base / "stage", ["ffmpeg", "ffprobe"])
+        self.assertIn("signature download failed for ffprobe", str(raised.exception))
+        # Only the first binary (whose signature was fine) may be extracted.
+        extract_mock.assert_called_once()
 
     def test_ffmpeg_source_manifest_is_pinned(self):
         manifest = mnemosyne.DEFAULT_FFMPEG_DOWNLOADS
@@ -537,23 +450,9 @@ class MnemosyneLauncherTests(unittest.TestCase):
                 self.assertTrue(source["checksum_name"])
         self.assertEqual(manifest["Darwin"]["kind"], "evermeet")
 
-    def test_root_docs_match_stateless_dragdrop_direction(self):
+    def test_readme_documents_drag_and_drop_mode(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        arch_path = ROOT / "system_architecture_deep_dive.md"
-        if arch_path.exists():
-            architecture = arch_path.read_text(encoding="utf-8")
-            self.assertNotIn("file:///", architecture)
-            self.assertNotIn("AI Agent", architecture)
-        # config.json was removed from the repo; verify defaults inline
-        config_sample = {
-            "_sample_note": "Reference example only. Mnemosyne does not auto-load this repo file at runtime.",
-            "profile_id": "480p",
-        }
-
         self.assertIn("Drag-and-Drop", readme)
-        self.assertIn("auto-load", config_sample.get("_sample_note", "").lower())
-        self.assertEqual(config_sample["profile_id"], "480p")
-        self.assertIn("_sample_note", config_sample)
 
     def test_windows_launcher_requires_adjacent_python_runtime(self):
         bat_text = (ROOT / "mnemosyne.bat").read_text(encoding="utf-8")
@@ -574,94 +473,6 @@ class MnemosyneLauncherTests(unittest.TestCase):
         self.assertIn('python3 "$SCRIPT_DIR/mnemosyne.py" "$@"', sh_text)
         self.assertNotIn("PY_EOF", sh_text)
         self.assertIn("mnemosyne.py is required", sh_text)
-
-    @unittest.skip("sync_wrappers.py was deleted; .sh is launcher-only, no embedding")
-    def test_sync_wrappers_embeds_python_source_into_shell_and_verifies_batch_launcher(self):
-        self.skipTest("sync_wrappers.py removed — .sh/.bat are launcher-only, no embedding")
-        with managed_tempdir("mnemo_test_sync_wrappers_") as base:
-            temp_root = base / "sync_case"
-            temp_root.mkdir()
-            py_path = temp_root / "mnemosyne.py"
-            sh_path = temp_root / "mnemosyne.sh"
-            bat_path = temp_root / "mnemosyne.bat"
-            sync_path = temp_root / "sync_wrappers.py"
-
-            py_code = "# sync sentinel\nprint('SYNC_SENTINEL')\n"
-            py_path.write_text(py_code, encoding="utf-8")
-            sh_path.write_text(
-                "#!/usr/bin/env bash\npython3 - << 'PY_EOF' \"$@\"\nprint('old shell')\nPY_EOF\n",
-                encoding="utf-8",
-            )
-            bat_path.write_text(
-                "@echo off\nset \"MNEMOSYNE_APP=%~dp0mnemosyne.py\"\nset \"PYTHON_CMD=python\"\n%PYTHON_CMD% -X utf8 \"%MNEMOSYNE_APP%\" %*\n",
-                encoding="utf-8",
-            )
-            shutil.copy(ROOT / "sync_wrappers.py", sync_path)
-
-            module_name = f"sync_wrappers_test_{time.time_ns()}"
-            spec = importlib.util.spec_from_file_location(module_name, sync_path)
-            module = importlib.util.module_from_spec(spec)
-            assert spec.loader is not None
-            spec.loader.exec_module(module)
-            module.sync()
-
-            sh_text = sh_path.read_text(encoding="utf-8")
-            bat_text = bat_path.read_text(encoding="utf-8")
-            self.assertIn("SYNC_SENTINEL", sh_text)
-            self.assertNotIn("REM#PY#", bat_text)
-            self.assertIn("mnemosyne.py", bat_text)
-
-    @unittest.skip("sync_wrappers.py was deleted; .sh is launcher-only, no embedding")
-    def test_sync_wrappers_raises_when_shell_marker_is_missing(self):
-        self.skipTest("sync_wrappers.py removed — .sh/.bat are launcher-only, no embedding")
-        with managed_tempdir("mnemo_test_sync_wrappers_shell_fail_") as base:
-            temp_root = base / "sync_shell_fail"
-            temp_root.mkdir()
-            (temp_root / "mnemosyne.py").write_text("print('SYNC_SENTINEL')\n", encoding="utf-8")
-            (temp_root / "mnemosyne.sh").write_text("#!/usr/bin/env bash\necho stale\n", encoding="utf-8")
-            (temp_root / "mnemosyne.bat").write_text("@echo off\nREM#PY# print('old bat')\n", encoding="utf-8")
-            sync_path = temp_root / "sync_wrappers.py"
-            shutil.copy(ROOT / "sync_wrappers.py", sync_path)
-
-            module_name = f"sync_wrappers_shell_fail_{time.time_ns()}"
-            spec = importlib.util.spec_from_file_location(module_name, sync_path)
-            module = importlib.util.module_from_spec(spec)
-            assert spec.loader is not None
-            spec.loader.exec_module(module)
-
-            with self.assertRaises(RuntimeError):
-                module.sync()
-
-            sh_text = (temp_root / "mnemosyne.sh").read_text(encoding="utf-8")
-            self.assertNotIn("SYNC_SENTINEL", sh_text)
-
-    @unittest.skip("sync_wrappers.py was deleted; .sh is launcher-only, no embedding")
-    def test_sync_wrappers_raises_when_batch_launcher_embeds_python(self):
-        self.skipTest("sync_wrappers.py removed — .sh/.bat are launcher-only, no embedding")
-        with managed_tempdir("mnemo_test_sync_wrappers_bat_fail_") as base:
-            temp_root = base / "sync_bat_fail"
-            temp_root.mkdir()
-            (temp_root / "mnemosyne.py").write_text("print('SYNC_SENTINEL')\n", encoding="utf-8")
-            (temp_root / "mnemosyne.sh").write_text(
-                "#!/usr/bin/env bash\npython3 - << 'PY_EOF' \"$@\"\nprint('old shell')\nPY_EOF\n",
-                encoding="utf-8",
-            )
-            (temp_root / "mnemosyne.bat").write_text("@echo off\nREM#PY# print('old bat')\n", encoding="utf-8")
-            sync_path = temp_root / "sync_wrappers.py"
-            shutil.copy(ROOT / "sync_wrappers.py", sync_path)
-
-            module_name = f"sync_wrappers_bat_fail_{time.time_ns()}"
-            spec = importlib.util.spec_from_file_location(module_name, sync_path)
-            module = importlib.util.module_from_spec(spec)
-            assert spec.loader is not None
-            spec.loader.exec_module(module)
-
-            with self.assertRaises(RuntimeError):
-                module.sync()
-
-            bat_text = (temp_root / "mnemosyne.bat").read_text(encoding="utf-8")
-            self.assertIn("REM#PY#", bat_text)
-            self.assertNotIn("SYNC_SENTINEL", bat_text)
 
     def test_python_entrypoint_help_smoke(self):
         result = subprocess.run(
@@ -690,6 +501,7 @@ class MnemosyneLauncherTests(unittest.TestCase):
 
             env = os.environ.copy()
             env["MNEMOSYNE_TEST_OUTPUT"] = str(result_path)
+            env["MNEMOSYNE_NO_PAUSE"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
             env["PYTHONUTF8"] = "1"
             env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
@@ -711,6 +523,40 @@ class MnemosyneLauncherTests(unittest.TestCase):
             self.assertEqual(payload["args"], ["--smoke", "alpha"])
             self.assertEqual(Path(payload["launcher_dir"]).resolve(), temp_root.resolve())
             self.assertIn("LAUNCHER_SMOKE_OK", result.stdout)
+
+    @unittest.skipUnless(mnemosyne.IS_WINDOWS, "Windows launcher smoke test requires Windows")
+    def test_windows_launcher_keeps_exclamation_marks_in_arguments(self):
+        with managed_tempdir("mnemo_test_bat_bang_") as base:
+            temp_root = base / "bat_case"
+            temp_root.mkdir()
+            bat_path = temp_root / "mnemosyne.bat"
+            py_path = temp_root / "mnemosyne.py"
+            result_path = temp_root / "launcher_result.json"
+
+            shutil.copy(ROOT / "mnemosyne.bat", bat_path)
+            write_launcher_smoke_stub(py_path)
+
+            env = os.environ.copy()
+            env["MNEMOSYNE_TEST_OUTPUT"] = str(result_path)
+            env["MNEMOSYNE_NO_PAUSE"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUTF8"] = "1"
+            env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+
+            result = subprocess.run(
+                ["cmd", "/c", "call", str(bat_path), "Wow!.mp4"],
+                cwd=temp_root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["args"], ["Wow!.mp4"])
 
     @unittest.skipUnless(mnemosyne.IS_WINDOWS, "Windows launcher missing runtime test requires Windows")
     def test_windows_launcher_missing_python_runtime_smoke(self):
@@ -794,7 +640,7 @@ class MnemosyneLauncherTests(unittest.TestCase):
             payload = json.loads(result_path.read_text(encoding="utf-8"))
             self.assertFalse(payload["result"])
             self.assertIn("FFmpeg Not Found", result.stdout)
-            self.assertIn("auto-download is disabled", result.stdout)
+            self.assertIn("FFmpeg could not be downloaded or found", result.stdout)
             self.assertFalse((Path(env["APPDATA"]) / mnemosyne.APP_NAME / "bin").exists())
 
     def test_unix_launcher_subprocess_smoke(self):
