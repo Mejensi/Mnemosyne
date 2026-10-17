@@ -379,6 +379,38 @@ class MnemosyneRuntimeValidationTests(unittest.TestCase):
         )
         return output_path
 
+    def make_rotated_copy(self, source: Path, rotated: Path, degrees=90):
+        """Copy a clip without re-encoding and tag it like portrait phone footage."""
+        try:
+            self.run_cmd(
+                [self.ffmpeg, "-y", "-display_rotation", str(degrees), "-i", str(source), "-c", "copy", str(rotated)]
+            )
+        except subprocess.CalledProcessError:
+            self.skipTest("This FFmpeg cannot set a display rotation")
+        return rotated
+
+    def test_get_media_info_reports_display_rotation(self):
+        with managed_tempdir("mnemo_test_rotation_info_") as base:
+            source = self.make_av_clip(base / "landscape.mp4", duration=1.0, size="640x360")
+            rotated = self.make_rotated_copy(source, base / "portrait.mp4")
+            plain_info = mnemosyne.get_media_info(source)
+            rotated_info = mnemosyne.get_media_info(rotated)
+            self.assertEqual(plain_info["rotation"], 0)
+            self.assertEqual(rotated_info["rotation"], 90)
+            self.assertEqual(mnemosyne.get_display_height(rotated_info), 640)
+            self.assertAlmostEqual(mnemosyne.get_video_display_ratio(rotated_info), 360 / 640, places=2)
+
+    def test_process_video_accepts_rotated_phone_video(self):
+        with managed_tempdir("mnemo_test_rotation_process_") as base:
+            source = self.make_av_clip(base / "landscape.mp4", duration=1.5, size="1280x720")
+            rotated = self.make_rotated_copy(source, base / "portrait.mp4")
+            result = mnemosyne.process_video(1, rotated, "libx264", default_config())
+            self.assertEqual(result, mnemosyne.ProcessResult.SUCCESS)
+            info = mnemosyne.get_media_info(rotated)
+            self.assertEqual(info["rotation"], 0)
+            self.assertGreater(info["height"], info["width"])
+            self.assertFalse(rotated.with_suffix(".mp4.bak").exists())
+
     def test_verify_output_rejects_truncated_output(self):
         with managed_tempdir("mnemo_test_truncate_") as base:
             inp = self.make_av_clip(base / "input60.mp4", duration=3.0, rate=60)
@@ -558,6 +590,39 @@ class MnemosyneRuntimeValidationTests(unittest.TestCase):
             self.assertGreater(info.get("duration", 0.0), 0.0)
             self.assertFalse(mnemosyne.verify_media_decode(outp, info))
 
+    def test_verify_output_rejects_corrupted_output_even_with_matching_frame_counts(self):
+        with managed_tempdir("mnemo_test_corrupt_default_") as base:
+            inp = self.make_av_clip(base / "input60.mp4", duration=2.0, rate=60, size="1280x720")
+            outp = self.make_faststart_transcode(inp, base / "valid_output.mp4")
+            # The untouched transcode must pass with the default settings.
+            self.assertTrue(mnemosyne.verify_output(inp, outp, default_config()))
+            original = outp.read_bytes()
+            mdat_start = original.find(b"mdat")
+            if mdat_start < 0:
+                self.skipTest("Could not locate mdat in faststart output")
+            corrupted = bytearray(original)
+            corrupt_offset = mdat_start + 8
+            for i in range(min(2048, len(corrupted) - corrupt_offset)):
+                corrupted[corrupt_offset + i] ^= 0xFF
+            outp.write_bytes(bytes(corrupted))
+            # The header (moov) still reports the right frame count, so only the
+            # decode gate can catch this.
+            ok, details = mnemosyne.verify_output(inp, outp, default_config(), return_details=True)
+            self.assertFalse(ok)
+            self.assertFalse(details["decode_ok"])
+
+    def test_verify_media_decode_rejects_cut_off_media_data(self):
+        with managed_tempdir("mnemo_test_decode_cut_off_") as base:
+            inp = self.make_av_clip(base / "input60.mp4", duration=2.5, rate=60)
+            outp = self.make_faststart_transcode(inp, base / "faststart_output.mp4")
+            original = outp.read_bytes()
+            # moov is at the front, so the header still describes the full video
+            # while the last 20% of the media data is gone.
+            outp.write_bytes(original[: int(len(original) * 0.8)])
+            info = mnemosyne.get_media_info(outp)
+            self.assertGreater(info.get("duration", 0.0), 0.0)
+            self.assertFalse(mnemosyne.verify_media_decode(outp, info))
+
     def test_get_media_info_counts_frames_when_requested_for_mkv(self):
         with managed_tempdir("mnemo_test_count_frames_") as base:
             source = self.make_multistream_clip(base / "counted.mkv")
@@ -681,6 +746,63 @@ class MnemosyneRuntimeValidationTests(unittest.TestCase):
             )
             self.assertFalse(mnemosyne.should_skip_video(source, default_config()))
 
+    def make_skip_info(self, **overrides):
+        info = {
+            "has_video": True,
+            "video_stream_count": 1,
+            "video_codec": "h264",
+            "video_pix_fmt": "yuv420p",
+            "width": 854,
+            "height": 480,
+            "fps": 30.0,
+            "video_bitrate": 800_000,
+            "format_bitrate": None,
+            "audio_streams": [{"codec": "aac", "bitrate": 128_000}],
+        }
+        info.update(overrides)
+        return info
+
+    def test_should_skip_video_allows_small_bitrate_overshoot(self):
+        config = default_config(video_bitrate="800k", audio_bitrate="128k")
+        path = Path("unused.mp4")
+        self.assertTrue(mnemosyne.should_skip_video(path, config, info=self.make_skip_info(video_bitrate=825_584)))
+        self.assertFalse(mnemosyne.should_skip_video(path, config, info=self.make_skip_info(video_bitrate=1_000_000)))
+
+    def test_should_skip_video_allows_tiny_fps_overshoot(self):
+        # WMV/ASF reports 30.3 fps for a 30 fps video; verify_output already allows +0.5 fps.
+        config = default_config(video_bitrate="800k", audio_bitrate="128k", target_fps=30)
+        path = Path("unused.wmv")
+        self.assertTrue(mnemosyne.should_skip_video(path, config, info=self.make_skip_info(fps=30.303)))
+        self.assertFalse(mnemosyne.should_skip_video(path, config, info=self.make_skip_info(fps=31.0)))
+
+    def test_should_skip_video_judges_whole_file_when_stream_bitrates_are_missing(self):
+        config = default_config(video_bitrate="800k", audio_bitrate="128k")
+        path = Path("unused.mkv")
+        mkv_like = self.make_skip_info(
+            video_bitrate=None, format_bitrate=925_351, audio_streams=[{"codec": "aac", "bitrate": None}]
+        )
+        self.assertTrue(mnemosyne.should_skip_video(path, config, info=mkv_like))
+        self.assertFalse(mnemosyne.should_skip_video(path, config, info=dict(mkv_like, format_bitrate=3_000_000)))
+        self.assertFalse(mnemosyne.should_skip_video(path, config, info=dict(mkv_like, format_bitrate=None)))
+
+    def test_second_run_skips_mkv_output(self):
+        with managed_tempdir("mnemo_test_mkv_second_run_") as base:
+            clip = self.make_av_clip(base / "source.mp4", duration=4.0, size="1280x720", rate=30)
+            mkv = base / "clip.mkv"
+            self.run_cmd([self.ffmpeg, "-y", "-i", str(clip), "-c", "copy", str(mkv)])
+            config = default_config(video_bitrate="800k")
+            self.assertEqual(mnemosyne.process_video(1, mkv, "libx264", config), mnemosyne.ProcessResult.SUCCESS)
+            self.assertEqual(mnemosyne.process_video(1, mkv, "libx264", config), mnemosyne.ProcessResult.SKIPPED)
+
+    def test_process_video_accepts_very_short_clips_with_audio(self):
+        # AAC adds about 20 ms of padding. On a clip around one second long that is more
+        # than the 2 % duration-ratio check allowed, so such clips used to be rejected.
+        for duration in (0.5, 1.0):
+            with self.subTest(duration=duration), managed_tempdir("mnemo_test_short_clip_") as base:
+                source = self.make_av_clip(base / "short.mp4", duration=duration, rate=30)
+                result = mnemosyne.process_video(1, source, "libx264", default_config())
+                self.assertEqual(result, mnemosyne.ProcessResult.SUCCESS)
+
     def test_process_video_preserves_low_fps_sources(self):
         with managed_tempdir("mnemo_test_lowfps_") as base:
             source = self.make_av_clip(base / "input24.mp4", duration=2.0, rate=24)
@@ -719,7 +841,9 @@ class MnemosyneRuntimeValidationTests(unittest.TestCase):
     def test_process_video_preserves_chapters(self):
         with managed_tempdir("mnemo_test_chapters_") as base:
             source = self.make_chaptered_clip(base / "chaptered.mkv")
-            result = mnemosyne.process_video(1, source, "libx264", default_config())
+            # The clip already fits the default test bitrate and would be skipped as
+            # "already optimized"; ask for far less so a real re-encode happens.
+            result = mnemosyne.process_video(1, source, "libx264", default_config(video_bitrate="100k"))
             info = mnemosyne.get_media_info(source)
             self.assertEqual(result, 1)
             self.assertEqual(info["chapter_count"], 2)
@@ -951,6 +1075,13 @@ class MnemosyneRuntimeValidationTests(unittest.TestCase):
             discovered = {str(path.resolve()) for path in mnemosyne.iter_video_files(base, recursive=True)}
             self.assertSetEqual(discovered, expected)
 
+    def test_iter_video_files_ignores_webm_files(self):
+        with managed_tempdir("mnemo_test_webm_ignored_") as base:
+            (base / "clip.mp4").write_bytes(b"x")
+            (base / "clip.webm").write_bytes(b"x")
+            discovered = {path.name for path in mnemosyne.iter_video_files(base)}
+            self.assertEqual(discovered, {"clip.mp4"})
+
     def test_install_binaries_atomically_preserves_existing_install_on_incomplete_stage(self):
         with managed_tempdir("mnemo_test_atomic_install_") as base:
             live_bin = base / "live_bin"
@@ -968,6 +1099,75 @@ class MnemosyneRuntimeValidationTests(unittest.TestCase):
                     mnemosyne.install_binaries_atomically(stage_dir, [old_ffmpeg.name, old_ffprobe.name])
             self.assertEqual(old_ffmpeg.read_bytes(), b"old_ffmpeg")
             self.assertEqual(old_ffprobe.read_bytes(), b"old_ffprobe")
+
+    def test_install_binaries_atomically_keeps_unrelated_files_in_install_dir(self):
+        with managed_tempdir("mnemo_test_atomic_keep_") as base:
+            names = mnemosyne.get_managed_ffmpeg_binary_names()
+            install_dir = base / "custom_tools"
+            (install_dir / "sub").mkdir(parents=True)
+            (install_dir / "keep_me.txt").write_text("important", encoding="utf-8")
+            (install_dir / "sub" / "x.cfg").write_text("x", encoding="utf-8")
+            for name in names:
+                (install_dir / name).write_bytes(b"old_" + name.encode())
+            stage_dir = base / "stage_bin"
+            stage_dir.mkdir()
+            for name in names:
+                (stage_dir / name).write_bytes(b"new_" + name.encode())
+
+            mnemosyne.install_binaries_atomically(stage_dir, names, install_dir)
+
+            for name in names:
+                self.assertEqual((install_dir / name).read_bytes(), b"new_" + name.encode())
+            self.assertEqual((install_dir / "keep_me.txt").read_text(encoding="utf-8"), "important")
+            self.assertEqual((install_dir / "sub" / "x.cfg").read_text(encoding="utf-8"), "x")
+            self.assertFalse(stage_dir.exists())
+            self.assertEqual([p.name for p in install_dir.iterdir() if ".bak." in p.name], [])
+
+    def test_install_binaries_atomically_rolls_back_when_second_binary_fails(self):
+        with managed_tempdir("mnemo_test_atomic_rollback_") as base:
+            names = mnemosyne.get_managed_ffmpeg_binary_names()
+            install_dir = base / "custom_tools"
+            install_dir.mkdir()
+            (install_dir / "keep_me.txt").write_text("important", encoding="utf-8")
+            for name in names:
+                (install_dir / name).write_bytes(b"old_" + name.encode())
+            stage_dir = base / "stage_bin"
+            stage_dir.mkdir()
+            for name in names:
+                (stage_dir / name).write_bytes(b"new_" + name.encode())
+
+            real_move = shutil.move
+            calls = {"count": 0}
+
+            def flaky_move(src, dst, *args, **kwargs):
+                calls["count"] += 1
+                if calls["count"] == 2:
+                    raise OSError("simulated disk error")
+                return real_move(src, dst, *args, **kwargs)
+
+            with patch.object(mnemosyne.shutil, "move", side_effect=flaky_move):
+                with self.assertRaises(OSError):
+                    mnemosyne.install_binaries_atomically(stage_dir, names, install_dir)
+
+            for name in names:
+                self.assertEqual((install_dir / name).read_bytes(), b"old_" + name.encode())
+            self.assertEqual((install_dir / "keep_me.txt").read_text(encoding="utf-8"), "important")
+            self.assertEqual([p.name for p in install_dir.iterdir() if ".bak." in p.name], [])
+
+    def test_install_binaries_atomically_creates_missing_install_dir(self):
+        with managed_tempdir("mnemo_test_atomic_fresh_") as base:
+            names = mnemosyne.get_managed_ffmpeg_binary_names()
+            stage_dir = base / "stage_bin"
+            stage_dir.mkdir()
+            for name in names:
+                (stage_dir / name).write_bytes(b"new_" + name.encode())
+            install_dir = base / "fresh" / "bin"
+
+            mnemosyne.install_binaries_atomically(stage_dir, names, install_dir)
+
+            for name in names:
+                self.assertEqual((install_dir / name).read_bytes(), b"new_" + name.encode())
+            self.assertFalse(stage_dir.exists())
 
     def test_process_video_refuses_stale_backup(self):
         with managed_tempdir("mnemo_test_stale_bak_") as base:
@@ -1399,6 +1599,10 @@ class MnemosyneRuntimeValidationTests(unittest.TestCase):
                 workdir = sandbox / scenario_dir.name
                 shutil.copytree(scenario_dir, workdir)
                 config = json.loads((scenario_dir / "config.json").read_text(encoding="utf-8"))
+                if scenario_dir.name == "scenario_03_multistream_mkv":
+                    # This MKV already fits the 800k target and would be skipped; ask for less
+                    # so the multi-stream file really goes through a re-encode.
+                    config["video_bitrate"] = "400k"
                 videos = sorted(mnemosyne.iter_video_files(workdir, recursive=config.get("recursive", False)))
                 self.assertTrue(videos, f"No input video found for {scenario_dir.name}")
                 if scenario_dir.name == "scenario_04_recursive_bak":
