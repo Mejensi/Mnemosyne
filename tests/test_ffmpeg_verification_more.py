@@ -6,7 +6,28 @@ import tempfile
 from pathlib import Path
 import sys
 
+import pytest
+
 import mnemosyne
+
+
+@pytest.fixture
+def offline_gpg(monkeypatch):
+    """verify_evermeet_signature needs a gpg program and downloads the signing key.
+
+    Fake both so these tests run offline, whether or not gpg is installed."""
+    real_which = mnemosyne.shutil.which
+    monkeypatch.setattr(
+        mnemosyne.shutil,
+        "which",
+        lambda name, *args, **kwargs: "/usr/bin/gpg" if name in ("gpg", "gpg2") else real_which(name, *args, **kwargs),
+    )
+
+    def fake_download(url, dest, show_progress=False):
+        Path(dest).write_text("fake signing key", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(mnemosyne, "download_url_to_file", fake_download)
 
 
 def test_verify_download_checksum_success(monkeypatch, tmp_path):
@@ -24,18 +45,17 @@ def test_verify_download_checksum_success(monkeypatch, tmp_path):
     assert ok is True
 
 
-def test_verify_download_checksum_failure(monkeypatch, tmp_path):
+def test_verify_download_checksum_failure(monkeypatch, tmp_path, caplog):
     f = tmp_path / 'a.txt'
     f.write_bytes(b'hello')
-    def fake_download(url, dest, show_progress=False):
-        Path(dest).write_text('deadbeef  a.txt')
-        return True
-    monkeypatch.setattr(mnemosyne, 'download_url_to_file', fake_download)
+    # verify_download_checksum fetches the checksum file with download_text.
+    monkeypatch.setattr(mnemosyne, 'download_text', lambda url: 'deadbeef  a.txt')
     ok = mnemosyne.verify_download_checksum(f, 'http://example.com/checksums.sha256', 'sha256', 'a.txt')
     assert ok is False
+    assert 'Checksum mismatch' in caplog.text
 
 
-def test_verify_evermeet_signature_success(monkeypatch, tmp_path):
+def test_verify_evermeet_signature_success(monkeypatch, tmp_path, offline_gpg):
     # Create fake archive and signature
     archive = tmp_path / 'a.zip'
     sig = tmp_path / 'a.zip.sig'
@@ -64,7 +84,7 @@ def test_verify_evermeet_signature_success(monkeypatch, tmp_path):
     assert ok is True
 
 
-def test_verify_evermeet_signature_foreign_key_rejected(monkeypatch, tmp_path):
+def test_verify_evermeet_signature_foreign_key_rejected(monkeypatch, tmp_path, offline_gpg, caplog):
     archive = tmp_path / 'a.zip'
     sig = tmp_path / 'a.zip.sig'
     archive.write_text('archive')
@@ -84,9 +104,10 @@ def test_verify_evermeet_signature_foreign_key_rejected(monkeypatch, tmp_path):
     monkeypatch.setattr(mnemosyne.subprocess, 'run', fake_run)
     ok = mnemosyne.verify_evermeet_signature(archive, sig)
     assert ok is False
+    assert 'not from pinned Evermeet fingerprint' in caplog.text
 
 
-def test_verify_evermeet_signature_failure(monkeypatch, tmp_path):
+def test_verify_evermeet_signature_failure(monkeypatch, tmp_path, offline_gpg, caplog):
     archive = tmp_path / 'a.zip'
     sig = tmp_path / 'a.zip.sig'
     archive.write_text('archive')
@@ -100,6 +121,7 @@ def test_verify_evermeet_signature_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(mnemosyne.subprocess, 'run', fake_run)
     ok = mnemosyne.verify_evermeet_signature(archive, sig)
     assert ok is False
+    assert 'fingerprint mismatch' in caplog.text
 
 
 def test_parse_checksum_gyan_raw_hash():
@@ -123,3 +145,15 @@ def test_atomic_write_json(tmp_path):
     assert ok is True
     loaded = mnemosyne.load_json_file(target, {})
     assert loaded == payload
+
+
+def test_ffmpeg_state_follows_ffmpeg_state_file_setting(monkeypatch, tmp_path):
+    # load/save_ffmpeg_state must use mnemosyne.FFMPEG_STATE_FILE; the tests (and anyone
+    # who wants the state somewhere else) redirect it through that one setting.
+    state_file = tmp_path / "custom_state.json"
+    monkeypatch.setattr(mnemosyne, "FFMPEG_STATE_FILE", state_file)
+    state = mnemosyne.load_ffmpeg_state()
+    state["preferred_storage_mode"] = "session"
+    assert mnemosyne.save_ffmpeg_state(state) is True
+    assert state_file.exists()
+    assert mnemosyne.load_ffmpeg_state()["preferred_storage_mode"] == "session"
