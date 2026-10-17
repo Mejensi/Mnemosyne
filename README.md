@@ -1,6 +1,11 @@
 <img width="2633" height="1171" alt="believeinyourself" src="https://github.com/user-attachments/assets/1942c116-a65b-49e1-b0cc-2f90a83e0ca5" />
 
+
 # Mnemosyne
+
+[![Tests](https://github.com/Mejensi/Mnemosyne/actions/workflows/python-tests.yml/badge.svg)](https://github.com/Mejensi/Mnemosyne/actions/workflows/python-tests.yml)
+![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 
 
 Mnemosyne is a powerful, automated video compression engine built for simplicity and absolute data safety. It re-encodes your video collection to H.264 while preserving original timestamps, metadata, subtitles, audio tracks, and chapters — leaving your digital history exactly as you left it.
