@@ -65,7 +65,11 @@ class DriveTypeDetectionTests(unittest.TestCase):
 
             with patch.object(mnemosyne, "Path", return_value=vol_dir):
                 volumes = mnemosyne._read_darwin_volumes()
-                self.assertTrue(len(volumes) >= 0)
+            expected = {
+                os.path.realpath(str(vol_dir / "Macintosh HD")),
+                os.path.realpath(str(vol_dir / "ExternalUSB")),
+            }
+            self.assertEqual(set(volumes), expected)
 
 
 class WorkerThrottlingAndSafetyTests(unittest.TestCase):
@@ -109,8 +113,11 @@ class WorkerThrottlingAndSafetyTests(unittest.TestCase):
             )
             parser = argparse.ArgumentParser()
 
-            # Mock drive type to return DRIVE_FIXED (3)
-            with patch.object(mnemosyne, "get_drive_type", return_value=3):
+            # Mock drive type to return DRIVE_FIXED (3). The worker limit is the CPU
+            # count, so pretend to have 8 cores (the test asks for 6 workers).
+            with patch.object(mnemosyne, "get_drive_type", return_value=3), patch.object(
+                mnemosyne.os, "cpu_count", return_value=8
+            ):
                 context = mnemosyne.build_run_context(args, parser)
 
             self.assertEqual(context.removable_targets, [])
