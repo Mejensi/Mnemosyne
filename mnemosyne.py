@@ -1,5 +1,5 @@
 """
-Mnemosyne V2.1 - The Keeper of Digital Memory
+Mnemosyne V2.2 - The Keeper of Digital Memory
 Copyright (C) 2026 Mejensi
 Licensed under GNU GPL v3.0
 
@@ -28,7 +28,7 @@ if platform.system() == "Windows":
     except (OSError, AttributeError, ValueError, TypeError) as _e:
         print(f"[Mnemosyne] Could not initialize Windows VT100 console mode: {_e}", file=sys.stderr)
 
-VERSION, APP_NAME = "2.1", "Mnemosyne"
+VERSION, APP_NAME = "2.2", "Mnemosyne"
 SYSTEM, IS_WINDOWS = platform.system(), platform.system() == "Windows"
 SESSION_ID = f"{os.getpid()}_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
 
