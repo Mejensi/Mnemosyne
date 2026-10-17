@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Mnemosyne V2.1 - The Keeper of Digital Memory
 Copyright (C) 2026 Mejensi
@@ -20,7 +19,6 @@ from logging.handlers import RotatingFileHandler
 if platform.system() == "Windows":
     try:
         import ctypes
-        # Enable VT100 support for ANSI colors
         kernel32 = ctypes.windll.kernel32
         hStdOut = kernel32.GetStdHandle(-11)
         mode = ctypes.c_ulong()
@@ -172,7 +170,7 @@ DEFAULT_CONFIG = {
     "preserve_metadata": True,
     "system_ffmpeg_policy": SystemFFmpegPolicy.PROMPT,
 }
-VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm', '.ts', '.m4v'}
+VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.ts', '.m4v'}  # no .webm: WebM cannot hold H.264 + AAC
 STREAM_TYPES = ("video", "audio", "subtitle", "data", "attachment")
 TEMP_WORKSPACE_NAME = ".mnemosyne_work"
 TEMP_WORKSPACE_MARKER = ".mnemosyne_owner"
@@ -204,10 +202,13 @@ PROCESS_SPACE_MIN_BYTES = 512 * 1024 * 1024
 FRAME_TOLERANCE_RATIO = 0.02
 ASPECT_RATIO_TOLERANCE = 0.03
 GEOMETRY_TOLERANCE_RATIO = 0.02
+SKIP_BITRATE_TOLERANCE = 1.10         # up to 10% above the target bitrate still counts as "already optimized"
+CONTAINER_OVERHEAD_TOLERANCE = 1.15   # extra room when only the whole-file bitrate is known (MKV, WMV, TS)
 DURATION_TOLERANCE_MIN = 0.25
 DURATION_TOLERANCE_RATIO = 0.01
 DURATION_RATIO_MIN = 0.98
 DURATION_RATIO_MAX = 1.02
+DURATION_GRACE_SEC = 0.1              # AAC adds ~20 ms of padding, which is a big share of a clip around one second long
 
 MAX_FFMPEG_TIMEOUT_SEC = 900
 BASE_DECODE_TIMEOUT_SEC = 60
@@ -274,25 +275,24 @@ class C:
     RESET = '\033[0m'
     BOLD = '\033[1m'
     DIM = '\033[2m'
-    PRIMARY = '\033[38;2;91;155;213m'   # Soft Blue
-    SUCCESS = '\033[38;2;16;185;129m'   # Emerald
-    WARNING = '\033[38;2;245;158;11m'   # Amber
-    ERROR = '\033[38;2;239;68;68m'      # Rose
-    INFO = '\033[38;2;14;165;233m'      # Sky
-    ACCENT = '\033[38;2;168;85;247m'    # Purple
-    MUTED = '\033[38;2;100;116;139m'    # Slate
+    PRIMARY = '\033[38;2;91;155;213m'
+    SUCCESS = '\033[38;2;16;185;129m'
+    WARNING = '\033[38;2;245;158;11m'
+    ERROR = '\033[38;2;239;68;68m'
+    INFO = '\033[38;2;14;165;233m'
+    ACCENT = '\033[38;2;168;85;247m'
+    MUTED = '\033[38;2;100;116;139m'
     WHITE = '\033[38;2;255;255;255m'
 
-# Unicode escapes for box characters to prevent source encoding issues
 BOX_UNICODE = {
-    'tl': '\u2554', # ╔
-    'tr': '\u2557', # ╗
-    'bl': '\u255a', # ╚
-    'br': '\u255d', # ╝
-    'h':  '\u2550', # ═
-    'v':  '\u2551', # ║
-    'ml': '\u2560', # ╠
-    'mr': '\u2563'  # ╣
+    'tl': '\u2554',
+    'tr': '\u2557',
+    'bl': '\u255a',
+    'br': '\u255d',
+    'h':  '\u2550',
+    'v':  '\u2551',
+    'ml': '\u2560',
+    'mr': '\u2563'
 }
 BOX_ASCII = {
     'tl': '+',
@@ -486,7 +486,6 @@ def enable_ansi():
         logging.debug(f"Could not initialize Windows VT100 console mode: {e}")
 
 def reset_cursor():
-    # Home cursor and clear everything below it to prevent ghosting
     sys.stdout.write("\033[H")
     sys.stdout.flush()
 
@@ -552,13 +551,11 @@ def _linux_device_is_removable(device_name: str) -> bool:
     if not dev_name:
         return False
     candidates = [f"/sys/class/block/{dev_name}/removable"]
-    # Modern "p"-prefixed partitions: nvme0n1p1 -> nvme0n1, mmcblk0p2 -> mmcblk0.
     p_idx = dev_name.rfind("p")
     if p_idx > 0:
         base = dev_name[:p_idx]
         if base:
             candidates.append(f"/sys/class/block/{base}/removable")
-    # Legacy numeric partitions: sdb1 -> sdb, sda12 -> sda.
     num_idx = len(dev_name)
     while num_idx > 0 and dev_name[num_idx - 1].isdigit():
         num_idx -= 1
@@ -619,7 +616,6 @@ def get_drive_type(path):
         except OSError:
             return DRIVE_FIXED
         mounts = _read_linux_mounts()
-        # Find the longest mount-point prefix that contains the path.
         best_match = ""
         best_device = ""
         for mount_point, device in mounts.items():
@@ -744,7 +740,7 @@ def load_json_file(path, fallback):
         return json.loads(json.dumps(fallback))
 
 def load_ffmpeg_state():
-    state_file = APP_DATA / 'ffmpeg_state.json'
+    state_file = FFMPEG_STATE_FILE
     raw_state = load_json_file(state_file, default_ffmpeg_state())
     state = default_ffmpeg_state()
     state["preferred_auto_download"] = bool(raw_state.get("preferred_auto_download", DEFAULT_CONFIG["auto_download_ffmpeg"]))
@@ -767,6 +763,7 @@ def load_ffmpeg_state():
             "created_at": int(entry.get("created_at") or 0),
             "last_used_at": int(entry.get("last_used_at") or 0),
             "verification_status": str(entry.get("verification_status") or "verified"),
+            "session_id": str(entry.get("session_id") or ""),
             "last_validation_error": str(entry.get("last_validation_error") or ""),
         })
     state["managed_installs"] = managed_installs
@@ -779,7 +776,7 @@ def save_ffmpeg_state(state):
         "preferred_custom_path": str(state.get("preferred_custom_path") or "").strip(),
         "managed_installs": state.get("managed_installs", []),
     })
-    state_file = APP_DATA / 'ffmpeg_state.json'
+    state_file = FFMPEG_STATE_FILE
     return atomic_write_json(state_file, normalized)
 
 
@@ -943,6 +940,7 @@ def upsert_managed_ffmpeg_install(install_dir, storage_mode, source_identity, ff
         "created_at": now,
         "last_used_at": now,
         "verification_status": str(verification_status or "verified"),
+        "session_id": SESSION_ID,
         "last_validation_error": "",
     }
     retained.append(state_entry)
@@ -1900,12 +1898,15 @@ class WorkerStats:
             self.history.pop(wid, None)
 
 # NOTE on st_ctime cross-platform behavior (FIX #13 documentation):
-#   Windows  — path.stat().st_ctime returns the file CREATION time (correct for SetFileTime)
+#   Windows  — st_birthtime (Python 3.12+) or st_ctime (older Pythons) is the file CREATION time (correct for SetFileTime).
+#              Python 3.12 deprecated st_ctime on Windows, so st_birthtime is used whenever it exists.
 #   Linux/macOS — st_ctime is the inode CHANGE time, NOT creation time.
 #   restore_file_metadata() already guards with `if platform.system() == "Windows":`,
 #   so SetFileTime is only called on Windows where ctime == creation time.
 #   On POSIX systems only atime/mtime are restored via os.utime(), which is the correct behaviour.
-def get_file_metadata(path): return (path.stat().st_ctime, path.stat().st_atime, path.stat().st_mtime)
+def get_file_metadata(path):
+    st = path.stat()
+    return (getattr(st, "st_birthtime", st.st_ctime), st.st_atime, st.st_mtime)
 def restore_file_metadata(path, metadata):
     ctime, atime, mtime = metadata
     os.utime(path, (atime, mtime))
@@ -1999,6 +2000,28 @@ def parse_float(raw_value, default=None):
         return float(raw_value)
     except (TypeError, ValueError):
         return default
+
+def parse_rotation(stream):
+    """Display rotation of a video stream in degrees: 0, 90, 180 or 270."""
+    raw_values = [
+        side_data.get("rotation")
+        for side_data in (stream.get("side_data_list") or [])
+        if isinstance(side_data, dict) and "rotation" in side_data
+    ]
+    raw_values.append((stream.get("tags") or {}).get("rotate"))
+    for raw_value in raw_values:
+        angle = parse_float(raw_value)
+        if angle is not None:
+            return int(round(angle)) % 360
+    return 0
+
+def is_quarter_turn(info):
+    """True when the video is stored sideways and shown rotated by 90 or 270 degrees."""
+    return int(info.get("rotation", 0) or 0) in (90, 270)
+
+def get_display_height(info):
+    """Height as a viewer sees it (the stored width when the video is rotated)."""
+    return int(info.get("width" if is_quarter_turn(info) else "height", 0) or 0)
 
 def normalize_tag_value(raw_value):
     return str(raw_value or "").strip()
@@ -2130,6 +2153,7 @@ def get_media_info(path, timeout=15, count_frames=False):
                     "frame_count": frame_count,
                     "bitrate": parse_bitrate(stream.get("bit_rate")),
                     "pix_fmt": stream.get("pix_fmt", ""),
+                    "rotation": parse_rotation(stream),
                     "sample_aspect_ratio": parse_ratio(stream.get("sample_aspect_ratio")),
                     "display_aspect_ratio": parse_ratio(stream.get("display_aspect_ratio")),
                     "language": normalize_stream_language(stream),
@@ -2153,6 +2177,7 @@ def get_media_info(path, timeout=15, count_frames=False):
             "frame_count": int((main_video or {}).get("frame_count", -1) or -1),
             "video_bitrate": (main_video or {}).get("bitrate"),
             "video_pix_fmt": (main_video or {}).get("pix_fmt", ""),
+            "rotation": int((main_video or {}).get("rotation", 0) or 0),
             "video_sample_aspect_ratio": (main_video or {}).get("sample_aspect_ratio"),
             "video_display_aspect_ratio": (main_video or {}).get("display_aspect_ratio"),
             "video_streams": video_streams,
@@ -2366,6 +2391,11 @@ def iter_ffmpeg_candidate_pairs(ffmpeg_state=None):
             is_managed = (managed_entry is not None) or (label == "runtime/bin") or (marker_data is not None)
             origin = "managed" if is_managed else "system"
             if is_managed and managed_entry and managed_entry.get("verification_status") == "user_override_unverified":
+                # "Accept once" means this run only: a later run must not reuse an unverified copy.
+                if managed_entry.get("session_id") != SESSION_ID:
+                    managed_entry["last_validation_error"] = "Unverified managed FFmpeg was accepted for an earlier run only."
+                    remove_managed_ffmpeg_install(managed_entry, ffmpeg_state)
+                    continue
                 if not validate_ffmpeg_pair(ffmpeg_path, ffprobe_path):
                     managed_entry["last_validation_error"] = "Unverified managed FFmpeg failed validation on startup."
                     remove_managed_ffmpeg_install(managed_entry, ffmpeg_state)
@@ -2473,7 +2503,7 @@ def powershell_download(url, destination):
         f"Invoke-WebRequest -UseBasicParsing -MaximumRedirection 10 -Uri '{escaped_url}' -OutFile '{escaped_dest}' -UserAgent 'Mozilla/5.0'"
     )
     result = subprocess.run(
-        ["powershell", "-ExecutionPolicy", "Bypass", "-NoProfile", "-Command", ps_cmd],
+        ["powershell", "-NoProfile", "-Command", ps_cmd],
         capture_output=True,
         text=True,
         encoding='utf-8',
@@ -2626,29 +2656,42 @@ def install_binaries_atomically(staged_dir, binary_names, install_dir=None):
     if missing:
         raise RuntimeError(f"Staged binaries missing: {', '.join(missing)}")
 
-    install_dir.parent.mkdir(parents=True, exist_ok=True)
-    backup_dir = install_dir.parent / f"{install_dir.name}.bak.{SESSION_ID}"
-    if backup_dir.exists():
-        shutil.rmtree(backup_dir, ignore_errors=True)
-    had_existing_install = install_dir.exists()
+    install_dir.mkdir(parents=True, exist_ok=True)
+    moved_aside = []
+    placed = []
 
     try:
-        if had_existing_install:
-            install_dir.rename(backup_dir)
-        staged_dir.rename(install_dir)
-    except OSError:
-        if had_existing_install and backup_dir.exists() and not install_dir.exists():
+        for name in binary_names:
+            live = install_dir / name
+            backup = install_dir / f"{name}.bak.{SESSION_ID}"
+            if backup.exists():
+                backup.unlink()
+            if live.exists():
+                live.rename(backup)
+                moved_aside.append((live, backup))
+            shutil.move(str(staged_dir / name), str(live))
+            placed.append(live)
+    except BaseException:
+        for live in placed:
             try:
-                backup_dir.rename(install_dir)
+                live.unlink()
+            except OSError:
+                pass
+        for live, backup in moved_aside:
+            try:
+                backup.rename(live)
             except OSError as restore_error:
-                logging.critical(f"FFmpeg install rollback failed: {restore_error}")
+                logging.critical(f"FFmpeg install rollback failed for {live}: {restore_error}")
         raise
     finally:
         if staged_dir.exists():
             shutil.rmtree(staged_dir, ignore_errors=True)
 
-    if had_existing_install and backup_dir.exists():
-        shutil.rmtree(backup_dir, ignore_errors=True)
+    for _live, backup in moved_aside:
+        try:
+            backup.unlink()
+        except OSError:
+            pass
 
 def verify_evermeet_signature(archive_path, signature_path):
     gpg = shutil.which("gpg") or shutil.which("gpg2")
@@ -2708,7 +2751,7 @@ def prompt_ffmpeg_storage_choice(ffmpeg_state=None):
     print(f" {C.PRIMARY}[FFMPEG] Choose where managed FFmpeg should be stored:{C.RESET}")
     print(f"    [1] AppData (persistent, recommended)")
     print(f"    [2] Portable launcher bin (persistent)")
-    print(f"    [3] Temp / Session (current run only)")
+    print(f"    [3] Runtime folder next to the launcher (kept until you delete it)")
     print(f"    [4] Custom Path")
     while True:
         answer = safe_input(f" {C.PRIMARY}>> Choice [Default={default_choice}]: {C.RESET}", default_choice).strip() or default_choice
@@ -2799,7 +2842,6 @@ def extract_ffmpeg_source(source, temp_dir, install_stage_dir, binary_names, all
         if not allow_unverified:
             sig_url = asset["signature_url"]
             if not download_url_to_file(sig_url, signature_path, show_progress=False):
-                # Fallback: scrape evermeet homepage for current version and build direct sig URL
                 try:
                     index_page = download_text("https://evermeet.cx/ffmpeg/")
                     archive_name = asset["binary_name"]
@@ -2855,7 +2897,7 @@ def prompt_unverified_ffmpeg_override(failed_sources):
     print(f"{C.WARNING}Continuing with an unverified archive may install tampered or corrupt binaries.{C.RESET}")
     print(f"{C.WARNING}Warning: Mnemosyne will execute downloaded binaries on your machine to test compatibility.{C.RESET}")
     print("")
-    print("Options:\n  1) Accept once (install for this session only)\n  2) Decline")
+    print("Options:\n  1) Accept once (used for this run only, removed the next time Mnemosyne starts)\n  2) Decline")
     while True:
         answer = safe_input(f" {C.PRIMARY}>> Choose 1 or 2: {C.RESET}", "2").strip()
         if answer == "1":
@@ -3092,21 +3134,33 @@ def should_skip_video(vpath, config, info=None):
         video_ok = (
             info.get("video_codec") == "h264" and
             info.get("video_pix_fmt") == TARGET_PIXEL_FORMAT and
-            0 < info.get("height", 0) <= config['target_height'] and
-            0 < info.get("fps", 0.0) <= config['target_fps']
+            0 < get_display_height(info) <= config['target_height'] and
+            0 < info.get("fps", 0.0) <= config['target_fps'] + 0.5
         )
         if not video_ok or target_video_bitrate is None:
             return False
 
         video_bitrate = info.get("video_bitrate")
-        if video_bitrate is None or video_bitrate > target_video_bitrate:
-            return False
+        audio_streams = info.get("audio_streams", [])
+        if video_bitrate is not None:
+            if video_bitrate > target_video_bitrate * SKIP_BITRATE_TOLERANCE:
+                return False
+        else:
+            total_bitrate = info.get("format_bitrate")
+            allowed_total = target_video_bitrate + (target_audio_bitrate or 0) * len(audio_streams)
+            if total_bitrate is None or total_bitrate > allowed_total * CONTAINER_OVERHEAD_TOLERANCE:
+                return False
 
-        for audio_stream in info.get("audio_streams", []):
+        for audio_stream in audio_streams:
             if audio_stream.get("codec") != "aac":
                 return False
             bitrate = audio_stream.get("bitrate")
-            if target_audio_bitrate is not None and (bitrate is None or bitrate > target_audio_bitrate):
+            if target_audio_bitrate is None:
+                continue
+            if bitrate is None:
+                if video_bitrate is not None:
+                    return False
+            elif bitrate > target_audio_bitrate * SKIP_BITRATE_TOLERANCE:
                 return False
         return True
     except Exception as e:
@@ -3120,16 +3174,20 @@ def normalize_stream_counts(info):
 def get_video_display_ratio(info):
     ratio = info.get("video_display_aspect_ratio")
     if isinstance(ratio, (int, float)) and ratio > 0.0:
-        return float(ratio)
-    width = int(info.get("width", 0) or 0)
-    height = int(info.get("height", 0) or 0)
-    if width <= 0 or height <= 0:
-        return None
-    ratio = width / height
-    sample_ratio = info.get("video_sample_aspect_ratio")
-    if isinstance(sample_ratio, (int, float)) and sample_ratio > 0.0:
-        ratio *= float(sample_ratio)
-    return ratio if ratio > 0.0 else None
+        ratio = float(ratio)
+    else:
+        width = int(info.get("width", 0) or 0)
+        height = int(info.get("height", 0) or 0)
+        if width <= 0 or height <= 0:
+            return None
+        ratio = width / height
+        sample_ratio = info.get("video_sample_aspect_ratio")
+        if isinstance(sample_ratio, (int, float)) and sample_ratio > 0.0:
+            ratio *= float(sample_ratio)
+        if ratio <= 0.0:
+            return None
+    # A video stored sideways (phone footage) is shown rotated, so width and height swap.
+    return 1.0 / ratio if is_quarter_turn(info) else ratio
 
 def get_expected_frame_count(in_info, config):
     in_frames = int(in_info.get("frame_count", -1) or -1)
@@ -3146,6 +3204,7 @@ def verify_media_decode(path, info=None):
     cmd = [
         FFMPEG_CMD,
         "-nostdin",
+        "-xerror",
         "-v", "error",
         "-i", str(path),
         "-map", "0:v?",
@@ -3201,11 +3260,13 @@ def verify_output(inp, outp, config, return_details=False, progress_cb=None):
 
         duration_tolerance = min(1.0, max(DURATION_TOLERANCE_MIN, in_d * DURATION_TOLERANCE_RATIO))
         duration_ratio = out_d / in_d if in_d > 0.0 else 0.0
-        dur_ok = abs(in_d - out_d) <= duration_tolerance and DURATION_RATIO_MIN <= duration_ratio <= DURATION_RATIO_MAX
+        duration_diff = abs(in_d - out_d)
+        duration_ratio_ok = DURATION_RATIO_MIN <= duration_ratio <= DURATION_RATIO_MAX or duration_diff <= DURATION_GRACE_SEC
+        dur_ok = duration_diff <= duration_tolerance and duration_ratio_ok
         codec_ok = out_info.get("video_codec") == "h264"
         pix_fmt_ok = out_info.get("video_pix_fmt") == TARGET_PIXEL_FORMAT
 
-        input_height = in_info.get("height", 0)
+        input_height = get_display_height(in_info)
         max_expected_height = min(input_height, config['target_height']) if input_height > 0 else config['target_height']
         height_ok = 0 < out_info.get("height", 0) <= max_expected_height
         width_ok = int(out_info.get("width", 0) or 0) > 0
@@ -3310,11 +3371,10 @@ def verify_output(inp, outp, config, return_details=False, progress_cb=None):
             logging.debug(f"verify_output [{inp.name}] Input Metadata Dump: {json.dumps(in_info, default=str)}")
             logging.debug(f"verify_output [{inp.name}] Output Metadata Dump: {json.dumps(out_info, default=str)}")
 
-        # If frame counting was already performed successfully, the file has
-        # already been fully decoded — skip redundant decode verification.
-        if details.get("frame_check") == "counted" and out_frames > 0:
-            details["decode_ok"] = True
-        elif metadata_ok:
+        # The frame count above is read from the container header, so it says
+        # nothing about the actual video data. Always decode the whole output
+        # before it is allowed to replace the original.
+        if metadata_ok:
             if progress_cb:
                 progress_cb("Frame Decode Integrity")
             details["decode_ok"] = verify_media_decode(outp, out_info)
@@ -3391,7 +3451,11 @@ def process_video(wid, vpath, codec, config):
         ])
 
         if "nvenc" in codec:
-            cmd.extend(["-rc:v:0", "vbr", "-cq:v:0", "24", "-preset:v:0", "p4"])
+            cmd.extend([
+                "-rc:v:0", "vbr", "-cq:v:0", "24",
+                "-b:v:0", config['video_bitrate'], "-maxrate:v:0", config['video_bitrate'],
+                "-preset:v:0", "p4",
+            ])
         elif "libx264" in codec:
             threads = config.get("ffmpeg_threads") or max(1, (os.cpu_count() or 4) // max(1, config.get("max_workers", 2)))
             cmd.extend(["-b:v:0", config['video_bitrate'], "-preset:v:0", config.get("x264_preset", "medium")])
@@ -4100,7 +4164,7 @@ def handle_interrupt(sig=None, frame=None):
     if baks:
         print(f"{C.WARNING}[!] {len(baks)} backup file(s) remain — run Mnemosyne again to restore them safely.{C.RESET}")
     print(f"{C.INFO}Clean-up complete. You may now exit.{C.RESET}")
-    os._exit(ExitCode.INTERRUPTED)  # Hard exit — ensures all threads stop immediately
+    os._exit(ExitCode.INTERRUPTED)
 
 def register_signal_handlers():
     import signal
