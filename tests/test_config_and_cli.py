@@ -111,7 +111,9 @@ class CommandLineArgumentsTests(unittest.TestCase):
                 str(target_file),
             ])
 
-            context = mnemosyne.build_run_context(args, self.parser)
+            # The worker limit is the machine's CPU count; pretend to have 8 cores.
+            with patch.object(mnemosyne.os, "cpu_count", return_value=8):
+                context = mnemosyne.build_run_context(args, self.parser)
             self.assertEqual(context.mode, "explicit-files")
             self.assertEqual(context.session_config["max_workers"], 3)
             self.assertEqual(context.session_config["target_height"], 1080)
