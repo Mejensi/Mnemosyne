@@ -23,7 +23,7 @@ tests/
 │   └── test_journal_recovery.py          # Atomic swap rollback, journal recovery, power outage safety
 ├── 6. Supply Chain & Cryptography
 │   ├── test_ffmpeg_verification.py       # Official SHA-256 and GPG verification
-│   └── test_ffmpeg_verification_more.py  # Foreign-key rejection, signature fallback scraping
+│   └── test_ffmpeg_verification_more.py  # Foreign-key rejection, signature checks (offline)
 └── 7. Core Transcoding & Stream Integrity
     └── test_runtime_validation.py        # Stream/subtitle/chapter preservation, ProcessManager
 ```
@@ -121,7 +121,6 @@ Ensures downloaded FFmpeg binaries are verified authentic and untampered.
   * Checksum verification: downloaded archives must match official SHA-256 hashes.
   * GPG signature verification: validates signatures against official distributor public keys.
   * **Foreign-Key Attack Rejection:** Strictly rejects archives signed by valid GPG keys that do not match the expected publisher fingerprint (`20F6EA3E0CFD6B4C53447A73476C4B611A660874`).
-  * HTML scraping fallback when static release URLs return HTTP 404.
 
 ---
 
@@ -141,10 +140,23 @@ Comprehensive end-to-end verification of video transcode quality and metadata pr
 
 ## Running the Test Suite
 
-```bash
-# Standard library unittest (no external dependencies required):
-python3 -m unittest discover -s tests
+The tests need `pytest` (the GitHub workflow uses it too):
 
-# With pytest:
-pytest -v tests
+```bash
+pip install pytest
+pytest -q tests
 ```
+
+Do not use `python3 -m unittest discover` as a full run: it skips the pytest-style tests
+(`test_ffmpeg_verification*.py`) without saying so, and it ignores `conftest.py`.
+
+### Test isolation
+
+`tests/conftest.py` redirects every folder Mnemosyne writes to (settings, FFmpeg state,
+managed FFmpeg installs, the `.mnemosyne_runtime` folder, the log file) to a temporary folder.
+Running the tests never touches your real `~/.mnemosyne` or the FFmpeg in `.mnemosyne_runtime`.
+The tests also run offline: downloads and `gpg` are faked.
+
+### Skipped tests
+
+Three Windows launcher tests in `test_launchers.py` only run on Windows.
