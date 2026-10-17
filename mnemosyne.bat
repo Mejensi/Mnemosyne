@@ -40,7 +40,7 @@ if not defined PYTHON_CMD (
     echo [!] Python 3.8 or newer required but not found.
     set /p "install=>> Install Python via winget? (Y/N): "
     if /i "!install!"=="Y" (
-        winget install Python.Python.3 --silent --accept-package-agreements --accept-source-agreements
+        winget install -e --id Python.Python.3.13 --silent --accept-package-agreements --accept-source-agreements
         if !errorlevel! neq 0 (
             echo [!] Failed. Install Python from python.org.
             set EXIT_CODE=1
@@ -56,14 +56,15 @@ if not defined PYTHON_CMD (
     )
 )
 
+REM Delayed expansion is switched off for the next line so exclamation marks in file names are not lost.
+setlocal disabledelayedexpansion
 %PYTHON_CMD% -X utf8 "%MNEMOSYNE_APP%" %*
-set EXIT_CODE=!errorlevel!
+endlocal & set "EXIT_CODE=%errorlevel%"
 
 if exist "%~dp0.mnemosyne_runtime\Mnemosyne_Log.txt" copy /Y "%~dp0.mnemosyne_runtime\Mnemosyne_Log.txt" "%~dp0Mnemosyne_Log.txt" >nul 2>&1
 
 :Finished
 if defined MNEMOSYNE_NO_PAUSE goto :NoPause
-if not "%~1"=="" goto :NoPause
 echo.
 pause
 
